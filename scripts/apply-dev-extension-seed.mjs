@@ -25,7 +25,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const OWNER = path.join(here, '..', 'pkg', 'barn', 'dev-extension.ts');
+const OWNER = path.join(here, '..', 'pkg', 'barn', 'extensions.ts');
 const SEED = path.join(here, '..', 'pkg', 'barn', 'dev-extension-seed.generated.ts');
 
 const NAMESPACE = 'barn';

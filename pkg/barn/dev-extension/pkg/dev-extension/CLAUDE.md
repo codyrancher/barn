@@ -40,6 +40,29 @@ watching it.
 - `yarn` is available. Adding a dependency means an install in here, which is slow and
   survives only as long as this pod's `/app` does.
 
+## What you can reach from here
+
+This pod runs as the `barn-extension` ServiceAccount, bound to **cluster-admin**, and `kubectl`
+is installed. So every resource in the cluster this Rancher manages is readable and writable
+from a terminal in here, including Rancher's own, which are CRDs in the same apiserver:
+
+```bash
+kubectl get settings.management.cattle.io      # what Rancher is configured to do
+kubectl get projects.management.cattle.io -A   # its grouping of namespaces
+kubectl get clusterrepos.catalog.cattle.io     # where its Apps come from
+kubectl get uiplugins.catalog.cattle.io -A     # extensions installed into its UI
+kubectl api-resources | grep cattle.io         # the rest, and there is a lot of it
+```
+
+That is deliberate: an extension is mostly a UI over those resources and cannot be tried from a
+pane that gets 403 to every question about them. It is also a live Rancher somebody is looking
+at, so read freely and say what you are about to change before you change it.
+
+The dashboard's own components are the best documentation available and they are already here:
+`/app/node_modules/@rancher/shell/components` and `.../components/form`. `SortableTable`,
+`LabeledSelect`, `AsyncButton`, `Banner`, `AppModal` and `Card` cover most of what a page needs.
+The published docs are at <https://extensions.rancher.io/extensions/next/home>.
+
 ## This tree is not the repo
 
 Nothing here is checked out from git and nothing syncs back. The repo copy lives in

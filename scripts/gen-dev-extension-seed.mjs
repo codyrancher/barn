@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const APP = path.join(here, '..', 'pkg', 'barn', 'dev-extension');
-const OWNER = path.join(here, '..', 'pkg', 'barn', 'dev-extension.ts');
+const OWNER = path.join(here, '..', 'pkg', 'barn', 'extensions.ts');
 const OUT = path.join(here, '..', 'pkg', 'barn', 'dev-extension-seed.generated.ts');
 
 // The app skeleton the dev server needs, plus the extension itself. There is no lockfile:

@@ -1,20 +1,29 @@
 <script>
-// The Editor: a chrome-less full-screen page reached from the flask button in
-// the side menu. Registered in index.ts under the 'blank' parent, which renders
-// nothing but the route (unlike 'plain', which still draws a header).
+// The Editor: two panes filling the page, reached from the flask button in the side menu or
+// from the extension box in the header.
 //
-// Left pane: a terminal in the DevExtension pod, with claude running in it (see
+// Left pane: a terminal in the extension's pod, with claude running in it (see
 // components/PodTerminal.vue).
-// Right pane: DevExtension's dev server (see dev-extension.ts) — the live,
-// hot-reloading Rancher that same pod is serving, framed same-origin through the
-// Kubernetes API service proxy, which is what makes framing it possible.
+// Right pane: that extension's dev server (see extensions.ts) — the live, hot-reloading
+// Rancher the same pod is serving, framed same-origin through the Kubernetes API service
+// proxy, which is what makes framing it possible.
 //
-// So the two panes are two views of one pod: what claude edits on the left is
-// what hot-reloads on the right.
-import { RcButton } from '@components/RcButton';
+// So the two panes are two views of one pod: what claude edits on the left is what
+// hot-reloads on the right, and which pod that is comes from the route.
+//
+// Registered in index.ts under the 'plain' parent rather than 'blank'. Blank renders the
+// route and nothing else, which meant this page had to carry a Back button to be escapable
+// at all. Plain brings the top-level menu, which is the way out; its header bar is hidden
+// here (see the unscoped style block at the bottom) because each pane labels itself.
 import { RcIcon } from '@components/RcIcon';
+import { RcButton } from '@components/RcButton';
 import PodTerminal from '../components/PodTerminal.vue';
-import { ensureDevExtension, devExtensionReady, devExtensionUrl } from '../dev-extension';
+import ExtensionSelect from '../components/ExtensionSelect.vue';
+import AgentFilesModal from '../components/AgentFilesModal.vue';
+import {
+  ensureExtension, extensionReady, extensionUrl, DEFAULT_EXTENSION
+} from '../extensions';
+import { EXTENSION_STARTING_ROUTE } from '../editor-product';
 
 // How close to an edge the divider can be dragged, in percent of the page.
 const MIN_SPLIT = 10;
@@ -55,7 +64,9 @@ const DEV_POLL_MS = 5000;
 export default {
   name: 'BarnEditor',
 
-  components: { RcButton, RcIcon, PodTerminal },
+  components: {
+    RcIcon, RcButton, PodTerminal, ExtensionSelect, AgentFilesModal
+  },
 
   data() {
     return {
@@ -66,10 +77,30 @@ export default {
       // Bookkeeping for the dev server poll, so it stops with the page.
       unmounted:    false,
       devPollTimer: null,
+      // Whether the agent-files modal is open. The left bar is about the source and about
+      // claude, and this is the first thing on it.
+      showAgentFiles: false,
     };
   },
 
+  computed: {
+    // Which extension this editor is pointed at. A path segment rather than a fixed name, so
+    // the header's box can send you between them, and defaulted so every link that predates
+    // there being more than one still works.
+    extension() {
+      return this.$route.params.extension || DEFAULT_EXTENSION;
+    },
+  },
+
   watch: {
+    // Switching extensions is switching pods: the right pane has to go back to waiting rather
+    // than keep framing the one that is no longer being edited. The terminal on the left
+    // re-connects on its own, because `extension` is a prop of it.
+    extension() {
+      this.rightUrl = '';
+      this.waitForDevServer();
+    },
+
     // Persist the divider position, but not on every pointermove — the final
     // position of a drag is written when the drag ends.
     split(percent) {
@@ -89,11 +120,20 @@ export default {
     // The terminal brings itself up (it waits on the pod, not on the dev
     // server), so nothing here has to wait for the left pane.
     this.waitForDevServer();
+
+    // What the page needs from the template it is under, and cannot ask for from inside its
+    // own scope: see the unscoped style block at the bottom. The class goes on <html> rather
+    // than on <body>, which was the first attempt and silently did nothing - the shell owns
+    // body's class list (theme-light, overflow-hidden, dashboard-body) and rewrites it whole
+    // on navigation, so a class added there survives until the next route change and no
+    // longer.
+    document.documentElement.classList.add('barn-editor-page');
   },
 
   beforeUnmount() {
     this.unmounted = true;
     clearTimeout(this.devPollTimer);
+    document.documentElement.classList.remove('barn-editor-page');
   },
 
   methods: {
@@ -101,11 +141,11 @@ export default {
     // loads, but a cold one installs and compiles for a few minutes first, and
     // framing it before then would show the proxy's error page instead.
     async waitForDevServer() {
-      ensureDevExtension();
+      ensureExtension(this.extension);
 
       while (!this.unmounted) {
-        if (await devExtensionReady()) {
-          this.rightUrl = devExtensionUrl();
+        if (await extensionReady(this.extension)) {
+          this.rightUrl = extensionUrl(this.extension);
 
           return;
         }
@@ -113,17 +153,6 @@ export default {
         await new Promise((resolve) => {
           this.devPollTimer = setTimeout(resolve, DEV_POLL_MS);
         });
-      }
-    },
-
-    goBack() {
-      // Vue Router records the entry it navigated from in history.state.back;
-      // it's null when the editor is the first page of the tab (the header
-      // button opens it in a new one), where there is nothing to go back to.
-      if (window.history.state?.back) {
-        this.$router.back();
-      } else {
-        this.$router.push({ name: 'home' });
       }
     },
 
@@ -177,22 +206,57 @@ export default {
     setSplit(percent) {
       this.split = clampSplit(percent);
     },
+
+    openExtension(name) {
+      this.$router.push({ name: this.$route.name, params: { extension: name } });
+    },
+
+    createExtension(name) {
+      ensureExtension(name);
+      this.$router.push({ name: EXTENSION_STARTING_ROUTE, params: { extension: name } });
+    },
   },
 };
 </script>
 
 <template>
   <div class="mc-editor">
-    <header class="mc-editor__toolbar">
-      <RcButton
-        variant="tertiary"
-        size="small"
-        left-icon="chevron-left"
-        @click="goBack"
+    <!--
+      One bar per pane rather than one across the page. Rancher's own header is hidden here
+      (see the unscoped block below), and a single bar over two panes would have had to say
+      which half each of its words was about. Each bar is the width of the pane under it and
+      moves with the divider, so the answer is where it is rather than what it says.
+    -->
+    <div class="mc-editor__bars">
+      <div
+        class="mc-editor__bar"
+        :style="{ width: `calc(${ split }% - 4px)` }"
       >
-        Back
-      </RcButton>
-    </header>
+        <RcButton
+          variant="link"
+          size="small"
+          data-testid="barn-agent-files-button"
+          @click="showAgentFiles = true"
+        >
+          Agent files
+        </RcButton>
+      </div>
+      <div class="mc-editor__bar-gap" />
+      <div class="mc-editor__bar mc-editor__bar--right">
+        <ExtensionSelect
+          :value="extension"
+          @open="openExtension"
+          @create="createExtension"
+        />
+        <a
+          v-if="rightUrl"
+          class="mc-editor__bar-link"
+          :href="rightUrl"
+          target="_blank"
+          rel="noopener"
+        >Open in a tab</a>
+      </div>
+    </div>
     <div
       ref="panes"
       class="mc-editor__panes"
@@ -200,6 +264,7 @@ export default {
     >
       <PodTerminal
         class="mc-editor__pane"
+        :extension="extension"
         :style="{ width: `calc(${ split }% - 4px)` }"
       />
       <div
@@ -224,7 +289,7 @@ export default {
         v-if="rightUrl"
         class="mc-editor__pane mc-editor__pane--right"
         :src="rightUrl"
-        title="DevExtension"
+        :title="extension"
       />
       <div
         v-else
@@ -235,12 +300,18 @@ export default {
           size="large"
           class="icon-spin"
         />
-        <span>Starting the DevExtension dev server</span>
+        <span>Starting the dev server for {{ extension }}</span>
         <span class="mc-editor__waiting-note">
           A first boot installs and compiles, which takes a few minutes.
         </span>
       </div>
     </div>
+
+    <AgentFilesModal
+      v-if="showAgentFiles"
+      :extension="extension"
+      @close="showAgentFiles = false"
+    />
   </div>
 </template>
 
@@ -248,27 +319,60 @@ export default {
 $divider-width: 8px;
 
 .mc-editor {
-  position: fixed;
-  inset: 0;
   display: flex;
   flex-direction: column;
-  width: 100vw;
-  height: 100vh;
+  // Fill the layout rather than the viewport. `position: fixed` and 100vh, which this used
+  // when the page drew no chrome at all, would put the panes over the top-level menu, and
+  // that rail is now the way out of here.
+  height: 100%;
   background: var(--body-bg, #fff);
 
-  &__toolbar {
+  &__bars {
+    flex: 0 0 auto;
+    display: flex;
+    border-bottom: 1px solid var(--border, #dcdee7);
+  }
+
+  &__bar {
     flex: 0 0 auto;
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--border, #dcdee7);
-    background: var(--header-bg, var(--body-bg, #fff));
+    gap: 8px;
+    // Enough for a name and a word about it, and no more: this bar exists to label a pane,
+    // not to become a second toolbar.
+    padding: 6px 10px;
+    min-width: 0;
+    font-size: 12px;
+    overflow: hidden;
+    white-space: nowrap;
+
+    &--right {
+      flex: 1 1 0;
+      width: auto;
+    }
+  }
+
+  // The divider's width, so the two bars break where the panes do.
+  &__bar-gap {
+    flex: 0 0 $divider-width;
+  }
+
+  &__bar-name {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &__bar-note {
+    color: var(--muted, #6c6c76);
+  }
+
+  &__bar-link {
+    margin-left: auto;
   }
 
   &__panes {
-    // Fill what the toolbar leaves; min-height lets the iframes shrink instead
-    // of pushing the toolbar off the page.
+    // Fill the page; min-height lets the iframes shrink rather than overflow it.
     flex: 1 1 auto;
     min-height: 0;
     display: flex;
@@ -341,4 +445,53 @@ $divider-width: 8px;
   width: 3px;
   background: var(--primary, #3d98d3);
 }
+</style>
+
+<style lang="scss">
+  // Unscoped, and it has to be: everything below belongs to the shell's 'plain' template, so
+  // nothing this page renders is inside the scope that would reach it. All of it is keyed on
+  // a class the page puts on <html> while it is mounted (see mounted()), so no other page
+  // under the same template is affected.
+  html.barn-editor-page {
+    // The header bar goes, the top-level menu stays. They are one element in the shell -
+    // TopLevelMenu is the first child of <header> - so this cannot be `display: none`. The
+    // grid row is collapsed by zeroing the variable that sizes it, the element is allowed to
+    // overflow what is left, and everything in it except the menu is hidden.
+    //
+    // Which leaves the way out of this page intact: the rail is fixed-positioned, so it is
+    // still where it always is once the row it nominally lives in is gone.
+    // Through `body` rather than on the element itself: the themes declare this on `:root`,
+    // which is this same element, and a class on it is no more specific than they are. One
+    // step down settles it without an !important.
+    body {
+      --header-height: 0px;
+    }
+
+    header[data-testid="header"] {
+      border:     none;
+      background: none;
+      overflow:   visible;
+      // Zeroing the grid row is not enough on its own. The element keeps its own 55px height,
+      // so it goes on overlapping the page under it, and an invisible 55px band across the top
+      // swallowed every click on the bars below - which is how this was found.
+      height:         0;
+      min-height:     0;
+      pointer-events: none;
+
+      > *:not(:first-child) {
+        display: none;
+      }
+
+      // The rail is the exception, because it is the one part of the header that stays.
+      > :first-child {
+        pointer-events: auto;
+      }
+    }
+
+    .main-layout > .indented-panel {
+      width:       100%;
+      margin:      0;
+      padding-top: 0 !important;
+    }
+  }
 </style>

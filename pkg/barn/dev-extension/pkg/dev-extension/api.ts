@@ -28,6 +28,9 @@ import { INSIGHTS_SERVER } from './insights-server';
 import { WORKSPACE_API_SERVER } from './workspace-api';
 import { DevPrompt, DEFAULT_PROMPTS } from './prompts';
 import { BROWSER_EXTENSION_FILES } from './browser-extension';
+// Which pod this dashboard is being served from. Worked out from the URL rather than written
+// down, because barn runs one of these per named extension - see config/constants.
+import { DEV_POD_NAMESPACE as POD_NAMESPACE, DEV_POD_SERVICE as POD_SERVICE } from './config/constants';
 
 // The `local` cluster, like the pod this dev server runs in. The product shows no cluster
 // switcher, so there is nothing that could make this a choice.
@@ -1431,9 +1434,15 @@ const WORKSPACE_TERMINAL_MAP = 'dev-terminal';
 const WORKSPACE_TERMINAL_MOUNT = '/seed';
 
 
-/** Where the originals live: the barn extension's own seed. */
-const SEED_NAMESPACE = 'barn';
-const SEED_CONFIG_MAP = 'barn-dev-extension';
+/**
+ * Where the originals live: this pod's own seed ConfigMap.
+ *
+ * Not a constant, because there is one of these per named extension and this dashboard has to
+ * copy from the one it was itself seeded from. Both come from the URL it is served at - see
+ * DEV_POD_SERVICE in config/constants.
+ */
+const SEED_NAMESPACE = POD_NAMESPACE;
+const SEED_CONFIG_MAP = POD_SERVICE;
 
 /**
  * The keys to copy, named rather than filtered.
@@ -1448,7 +1457,7 @@ const TERMINAL_FILES = [
 ];
 
 /** Where the dev server's pod lives, which is the pod the global terminals attach to. */
-const DEV_POD_NAMESPACE = 'barn';
+const DEV_POD_NAMESPACE = POD_NAMESPACE;
 export const GLOBAL_SERVICE_ACCOUNT = 'dev-global-terminal';
 
 /** The ServiceAccount every workspace pod runs as, one per workspace namespace. */
@@ -1709,7 +1718,7 @@ export async function claudeIdentity(): Promise<ClaudeIdentity | null> {
  * reports the state and Settings offers it as something to do deliberately.
  */
 export async function devPodServiceAccount(): Promise<{ current: string; wanted: string }> {
-  const deployment = await devFetch(`${ BASE }/v1/apps.deployments/${ DEV_POD_NAMESPACE }/barn-dev-extension`).catch(() => null);
+  const deployment = await devFetch(`${ BASE }/v1/apps.deployments/${ DEV_POD_NAMESPACE }/${ POD_SERVICE }`).catch(() => null);
 
   return {
     current: deployment?.spec?.template?.spec?.serviceAccountName || 'default',
@@ -1725,7 +1734,7 @@ export async function devPodServiceAccount(): Promise<{ current: string; wanted:
  * that is part way through.
  */
 export async function setDevPodServiceAccount(): Promise<void> {
-  const url = `${ BASE }/v1/apps.deployments/${ DEV_POD_NAMESPACE }/barn-dev-extension`;
+  const url = `${ BASE }/v1/apps.deployments/${ DEV_POD_NAMESPACE }/${ POD_SERVICE }`;
   const deployment = await devFetch(url);
 
   deployment.spec.template.spec.serviceAccountName = GLOBAL_SERVICE_ACCOUNT;

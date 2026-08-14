@@ -72,15 +72,35 @@ export const DEFAULT_WORKSPACE_TAB = 'conversations';
 /**
  * The pod this dashboard is served from, which is what the global terminal attaches to.
  *
- * Repeated here rather than imported from the barn extension that creates it, because
- * that package is not in this one's tree: the pod is seeded with `pkg/dev-extension` and
- * nothing else, so an import of it would compile in a checkout and fail in the pod that
- * actually runs this. Three constants, all of them things that would break loudly rather than
- * silently if they drifted: the terminal would say it is waiting for a pod that is right
- * there.
+ * Read out of the URL rather than written down. There can be several of these pods - barn
+ * makes one per named extension - and each is reached through a Service of its own, so a
+ * constant here would be the name of whichever one happened to be first and every other copy
+ * would open a terminal in the wrong pod.
+ *
+ * The browser is always on the apiserver's service proxy:
+ *
+ *   /k8s/clusters/<cluster>/api/v1/namespaces/<ns>/services/http:<service>:8005/proxy/...
+ *
+ * and <ns>/<service> is exactly the pair this needs, because barn names the Deployment, the
+ * Service and the pod's `app` label the same thing.
+ *
+ * The fallback is for a build served any other way - a plain `yarn dev` against a Rancher, on
+ * somebody's laptop - where there is no pod to attach to and the terminal cannot work anyway.
  */
-export const DEV_POD_NAMESPACE = 'barn';
-export const DEV_POD_LABELS = { app: 'barn-dev-extension' };
+function servedFrom(): { namespace: string; service: string } {
+  const match = window.location.pathname.match(
+    /\/api\/v1\/namespaces\/([^/]+)\/services\/[^:/]+:([^:/]+):\d+\/proxy/
+  );
+
+  return match ? { namespace: match[1], service: match[2] } : { namespace: 'barn', service: 'barn-dev-extension' };
+}
+
+const SERVED_FROM = servedFrom();
+
+export const DEV_POD_NAMESPACE = SERVED_FROM.namespace;
+/** The Deployment, the Service and the seed ConfigMap all carry this name. */
+export const DEV_POD_SERVICE = SERVED_FROM.service;
+export const DEV_POD_LABELS = { app: SERVED_FROM.service };
 export const DEV_POD_CONTAINER = 'devserver';
 
 /**

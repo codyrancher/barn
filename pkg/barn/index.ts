@@ -1,8 +1,8 @@
 import { importTypes } from '@rancher/auto-import';
 import { IPlugin } from '@shell/core/types';
 import { ensureEditorContent } from './api';
-import { ensureDevExtension } from './dev-extension';
-import { EDITOR_ROUTE } from './editor-product';
+import { ensureDefaultExtension } from './extensions';
+import { EDITOR_ROUTE, EXTENSION_STARTING_ROUTE } from './editor-product';
 import HeaderButtons from './components/HeaderButtons.vue';
 
 // Init the package
@@ -24,19 +24,37 @@ export default function(plugin: IPlugin): void {
   // create-if-missing; errors swallowed so it never blocks the UI).
   ensureEditorContent();
 
-  // So is DevExtension's dev server (see dev-extension.ts): the seed ConfigMap,
-  // the pod and its Service, created here so the dev server is installed and
-  // running from the moment the extension loads rather than behind a toggle.
-  // First boot installs and compiles for a couple of minutes; the pod is only
-  // ready once it can serve.
-  ensureDevExtension();
+  // So is the default extension's dev server (see extensions.ts): the seed
+  // ConfigMap, the pod and its Service, created here so there is somewhere to
+  // edit from the moment this bundle loads rather than behind a toggle. First
+  // boot installs and compiles for a couple of minutes; the pod is only ready
+  // once it can serve. Any others are made from the header's box, on demand.
+  ensureDefaultExtension();
 
-  // The editor itself: two iframes, no chrome. Registered under the 'blank'
-  // parent, which renders nothing but the route — 'plain' still draws a header.
-  plugin.addRoute('blank', {
+  // The editor itself: two panes under Rancher's own header.
+  //
+  // 'plain' rather than 'blank'. Blank renders the route and nothing else, which meant the
+  // editor had to carry a Back button to be escapable at all, and a page whose only way out
+  // is a button it drew itself is a dead end when that button is the thing you are editing.
+  // Plain draws the header and the top-level menu, so leaving is the same click it is
+  // everywhere else in Rancher.
+  //
+  // 'default' would have been the other candidate and is wrong: it renders nothing until
+  // `clusterReady`, and this route has no cluster in it.
+  //
+  // The extension is a path segment rather than a query, and optional: `/barn/editor` is the
+  // default one, which is what the side-menu button and every existing link point at.
+  plugin.addRoute('plain', {
     name:      EDITOR_ROUTE,
-    path:      '/barn/editor',
+    path:      '/barn/editor/:extension?',
     component: () => import('./pages/editor.vue'),
+  });
+
+  // Where a newly created extension is watched while its pod pulls, installs and compiles.
+  plugin.addRoute('plain', {
+    name:      EXTENSION_STARTING_ROUTE,
+    path:      '/barn/extension/:extension/starting',
+    component: () => import('./pages/extension-starting.vue'),
   });
 
   // The global buttons, in the header on every page: Editor, and the dev

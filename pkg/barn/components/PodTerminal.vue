@@ -6,7 +6,7 @@
 // here, so the pty comes from Kubernetes instead: the exec subresource gives a
 // real TTY in the pod, through Rancher's cluster proxy, authenticated by the
 // session cookie the page already has. Everything on the far side of it is the
-// same idea, and lives in dev-extension/pod/: tmux for a session that outlives
+// same idea, and lives in seed/pod/: tmux for a session that outlives
 // the browser tab, and claude looping inside it.
 //
 // The protocol is `base64.channel.k8s.io`, which is what the dashboard's own
@@ -22,7 +22,9 @@ import Socket, {
   EVENT_MESSAGE,
   EVENT_CONNECT_ERROR,
 } from '@shell/utils/socket';
-import { ensureDevExtension, devExtensionPod, devExtensionShellUrl } from '../dev-extension';
+import {
+  ensureExtension, extensionPod, extensionShellUrl, DEFAULT_EXTENSION
+} from '../extensions';
 
 // The dashboard's own build pulls this in globally; an extension's does not, so
 // without it a built extension renders the terminal unstyled.
@@ -48,6 +50,14 @@ export default {
     session: {
       type:    String,
       default: 'editor',
+    },
+
+    // Which extension's pod to open the session in. There can be several, and a
+    // terminal that always went to the same one would be a terminal in the wrong
+    // pod as soon as you were editing anything else.
+    extension: {
+      type:    String,
+      default: DEFAULT_EXTENSION,
     },
   },
 
@@ -155,7 +165,7 @@ export default {
     // Wait for a pod, then connect. A cold pod is created by the extension
     // itself when it loads, so this is a wait rather than an error.
     async connectWhenPodIsUp() {
-      ensureDevExtension();
+      ensureExtension(this.extension);
 
       // Whatever went wrong last time is over: this is a fresh wait, and the
       // error belongs to the connection that ended. Left in place, the exec
@@ -166,7 +176,7 @@ export default {
       this.error = '';
 
       while (!this.unmounted) {
-        const pod = await devExtensionPod();
+        const pod = await extensionPod(this.extension);
 
         if (pod) {
           this.connect(pod);
@@ -182,7 +192,7 @@ export default {
     },
 
     connect(pod) {
-      const socket = new Socket(devExtensionShellUrl(pod, this.session), false, 0, 'base64.channel.k8s.io');
+      const socket = new Socket(extensionShellUrl(pod, this.session), false, 0, 'base64.channel.k8s.io');
 
       socket.addEventListener(EVENT_CONNECTING, () => {
         this.state = 'connecting';
