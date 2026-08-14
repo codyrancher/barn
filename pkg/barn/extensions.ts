@@ -514,55 +514,90 @@ export function podExecOnce(pod: string, command: string[]): Promise<string> {
 }
 
 /**
- * The files that shape what the agent in this pod does.
+ * A command run in the pod as the user that owns the tree.
  *
- * Everything claude reads before it reads the code: the instructions in the tree, the ones in
- * its home, the skills it can invoke, and the per-session copy `shell.sh` drops into a new
- * conversation. Found rather than listed, because a skill added in the pod half an hour ago is
- * exactly the kind of thing somebody opening this wants to see.
- *
- * `-maxdepth` on each root keeps this from walking node_modules, which is tens of thousands of
- * files and holds a `CLAUDE.md` or two of its own that belong to a dependency rather than here.
+ * The exec subresource runs as the container's user, which is root, and everything under /app
+ * belongs to uid 1000 (boot.sh hands it over so that claude, which refuses to run as root, can
+ * edit what the dev server is watching). Two things go wrong without this drop: git refuses a
+ * tree it calls "dubious ownership", and a file written here comes out root-owned, which claude
+ * then cannot edit - a failure that shows up minutes later in a pane nobody was watching.
  */
-export const AGENT_FILE_ROOTS = [
-  { path: '/app', depth: 1, label: 'the app' },
-  { path: '/app/pkg', depth: 2, label: 'the extension' },
-  { path: '/app/.home/.claude', depth: 3, label: 'claude' },
-  { path: '/app/.sessions', depth: 2, label: 'this conversation' },
-];
+function asPodUser(script: string): string[] {
+  // HOME with it. setpriv changes the uid and not the environment, so HOME stays /root, and
+  // git then warns twice on every call that it cannot read /root/.config/git. Harmless - it is
+  // on stderr and nothing here reads stderr - but it is the sort of noise that costs somebody
+  // ten minutes the first time they run one of these by hand.
+  const withHome = `export HOME=/app/.home; ${ script }`;
 
-const AGENT_FILE_NAMES = ['CLAUDE.md', 'SKILL.md', 'settings.json', 'settings.local.json'];
+  return ['/bin/sh', '-c', `setpriv --reuid=1000 --regid=1000 --init-groups /bin/sh -c ${ shellQuote(withHome) }`];
+}
 
-export async function listAgentFiles(name: string): Promise<string[]> {
+/**
+ * Where the extension's own source is inside the pod.
+ *
+ * Resolved by looking rather than by name. Every pod is seeded from one tree, so the package
+ * directory is called whatever that tree calls it (`pkg/dev-extension`) no matter what the
+ * extension is named, and a constant here would be right for one of them and wrong for the
+ * rest. There is exactly one directory under `/app/pkg`, which is what makes this safe.
+ */
+const PACKAGE_DIR = '"$(ls -d /app/pkg/*/ | head -1)"';
+
+/** Run something in the pod, in the extension's package directory, as the tree's owner. */
+async function inPackage(name: string, script: string): Promise<string> {
   const pod = await extensionPod(name);
 
   if (!pod) {
-    return [];
+    return '';
   }
 
-  const names = AGENT_FILE_NAMES.map((file) => `-name '${ file }'`).join(' -o ');
-  const finds = AGENT_FILE_ROOTS
-    .map((root) => `find ${ root.path } -maxdepth ${ root.depth } \\( ${ names } \\) -type f 2>/dev/null`)
-    .join('; ');
+  // Braces, not a bare `&&`. Several of these scripts are `;`-separated lists, and `cd X &&
+  // a ; b` only guards `a`: a failed cd would run the rest of the list wherever the shell
+  // happened to be, which for `git init` means initialising a repository in /.
+  return podExecOnce(pod, asPodUser(`cd ${ PACKAGE_DIR } && { ${ script } ; }`));
+}
 
-  const out = await podExecOnce(pod, ['/bin/sh', '-c', finds]);
+/**
+ * Make the package a git repository if it is not one yet.
+ *
+ * The pod's tree is seeded from a ConfigMap rather than cloned, so it starts with no history at
+ * all: nothing to diff an edit against, nothing to undo it with, and no answer to "what did
+ * claude change in the last hour". One `git init` and one commit of the seeded state is the
+ * whole fix, and it is cheap enough (42 files) to do the first time anybody looks.
+ *
+ * `main` explicitly, because git's default branch name depends on the version and on a config
+ * nobody set in here, and a branch dropdown that says `master` on one pod and `main` on the next
+ * is a needless surprise.
+ */
+export async function ensureExtensionRepo(name: string): Promise<void> {
+  await inPackage(name, [
+    'test -d .git && exit 0',
+    'printf "node_modules/\\n" > .gitignore',
+    'git init -q -b main',
+    'git add -A',
+    'git -c user.email=barn@rancher.local -c user.name=barn commit -q -m "The seeded extension"',
+  ].join(' ; '));
+}
+
+/** Every file in the package, as paths relative to it. Excludes node_modules by construction. */
+export async function listExtensionFiles(name: string): Promise<string[]> {
+  // `find` rather than `git ls-files`, so a file created a moment ago and not yet added is
+  // listed. An untracked file is still a file somebody wants to open.
+  const out = await inPackage(name, "find . -name node_modules -prune -o -name .git -prune -o -type f -print | sed 's|^\\./||'");
 
   return out.split('\n').map((line) => line.trim()).filter(Boolean).sort();
 }
 
-export async function readAgentFile(name: string, path: string): Promise<string> {
-  const pod = await extensionPod(name);
-
-  return pod ? podExecOnce(pod, ['/bin/sh', '-c', `cat ${ shellQuote(path) } 2>/dev/null`]) : '';
+export async function readExtensionFile(name: string, path: string): Promise<string> {
+  return inPackage(name, `cat ${ shellQuote(path) } 2>/dev/null`);
 }
 
 /**
  * Write one back.
  *
- * Through base64 rather than a here-doc: these are markdown files full of backticks, dollars
- * and quotes, and every one of those is something a shell would interpret on the way in.
+ * Through base64 rather than a here-doc: these are source files full of backticks, dollars and
+ * quotes, and every one of those is something a shell would interpret on the way in.
  */
-export async function writeAgentFile(name: string, path: string, contents: string): Promise<void> {
+export async function writeExtensionFile(name: string, path: string, contents: string): Promise<void> {
   const pod = await extensionPod(name);
 
   if (!pod) {
@@ -573,8 +608,70 @@ export async function writeAgentFile(name: string, path: string, contents: strin
   const encoded = btoa(String.fromCharCode(...new TextEncoder().encode(contents)));
   const quoted = shellQuote(path);
 
-  await podExecOnce(pod, ['/bin/sh', '-c',
-    `mkdir -p "$(dirname ${ quoted })" && echo ${ encoded } | base64 -d > ${ quoted }`]);
+  await inPackage(name, `mkdir -p "$(dirname ${ quoted })" && echo ${ encoded } | base64 -d > ${ quoted }`);
+}
+
+export interface ExtensionBranches {
+  current: string;
+  branches: string[];
+}
+
+export async function listBranches(name: string): Promise<ExtensionBranches> {
+  const out = await inPackage(name, 'git branch --format="%(refname:short)" 2>/dev/null; echo ---; git rev-parse --abbrev-ref HEAD 2>/dev/null');
+  const [listed = '', current = ''] = out.split('---');
+
+  return {
+    current:  current.trim(),
+    branches: listed.split('\n').map((line) => line.trim()).filter(Boolean),
+  };
+}
+
+/** Switch to a branch, creating it from where HEAD is if it does not exist. */
+export async function checkoutBranch(name: string, branch: string): Promise<string> {
+  // `git checkout -B` would reset an existing branch to HEAD, which is a data-losing way to
+  // spell "switch to". So: try to switch, and only create when there is nothing to switch to.
+  return inPackage(name, `git checkout ${ shellQuote(branch) } 2>&1 || git checkout -b ${ shellQuote(branch) } 2>&1`);
+}
+
+export interface ExtensionCommit {
+  sha: string;
+  subject: string;
+  when: string;
+  who: string;
+}
+
+/**
+ * The branch's commits, newest first.
+ *
+ * A unit separator between the fields rather than a comma or a tab, because a commit subject can
+ * contain either and this is parsed by splitting.
+ */
+export async function listCommits(name: string, limit = 50): Promise<ExtensionCommit[]> {
+  const out = await inPackage(name, `git log -n ${ limit } --format='%h%x1f%s%x1f%cr%x1f%an' 2>/dev/null`);
+
+  return out.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+    const [sha, subject, when, who] = line.split('\x1f');
+
+    return {
+      sha, subject, when, who
+    };
+  });
+}
+
+/** Commit whatever is currently different, which is how an edit here becomes history. */
+export async function commitExtension(name: string, message: string): Promise<string> {
+  return inPackage(name, [
+    'git add -A',
+    `git -c user.email=barn@rancher.local -c user.name=barn commit -q -m ${ shellQuote(message) } 2>&1`,
+    'git log -1 --format=%h',
+  ].join(' && '));
+}
+
+/** How many files differ from the last commit, so the UI can offer to make one. */
+export async function countChanges(name: string): Promise<number> {
+  const out = await inPackage(name, 'git status --porcelain 2>/dev/null | wc -l');
+
+  return parseInt(out.trim(), 10) || 0;
 }
 
 /** Single-quote for `sh`, the only form that needs no other escaping inside it. */

@@ -19,7 +19,7 @@ import { RcIcon } from '@components/RcIcon';
 import PodTerminal from '../components/PodTerminal.vue';
 import ExtensionSelect from '../components/ExtensionSelect.vue';
 import ClaudeMark from '../components/ClaudeMark.vue';
-import AgentFilesModal from '../components/AgentFilesModal.vue';
+import ExtensionFilesModal from '../components/ExtensionFilesModal.vue';
 import {
   ensureExtension, extensionReady, extensionUrl, DEFAULT_EXTENSION
 } from '../extensions';
@@ -65,7 +65,7 @@ export default {
   name: 'BarnEditor',
 
   components: {
-    RcIcon, PodTerminal, ExtensionSelect, AgentFilesModal, ClaudeMark
+    RcIcon, PodTerminal, ExtensionSelect, ExtensionFilesModal, ClaudeMark
   },
 
   data() {
@@ -77,9 +77,9 @@ export default {
       // Bookkeeping for the dev server poll, so it stops with the page.
       unmounted:    false,
       devPollTimer: null,
-      // Whether the agent-files modal is open. The left bar is about the source and about
-      // claude, and this is the first thing on it.
-      showAgentFiles: false,
+      // Whether the source browser is open. The left bar is about the source and about claude,
+      // and this is the first thing on it.
+      showFiles: false,
     };
   },
 
@@ -236,9 +236,9 @@ export default {
           type="button"
           class="mc-editor__icon-button"
           data-testid="barn-agent-files-button"
-          title="Agent files"
-          aria-label="Agent files"
-          @click="showAgentFiles = true"
+          title="Files"
+          aria-label="Files"
+          @click="showFiles = true"
         >
           <ClaudeMark :size="16" />
         </button>
@@ -303,10 +303,10 @@ export default {
       </div>
     </div>
 
-    <AgentFilesModal
-      v-if="showAgentFiles"
+    <ExtensionFilesModal
+      v-if="showFiles"
       :extension="extension"
-      @close="showAgentFiles = false"
+      @close="showFiles = false"
     />
   </div>
 </template>

@@ -10,7 +10,7 @@
 // directory with a single child folded into its parent so a path nobody branched at does not
 // cost four rows to walk past.
 export default {
-  name: 'AgentFileTree',
+  name: 'FileTree',
 
   props: {
     node: {
@@ -38,25 +38,25 @@ export default {
 </script>
 
 <template>
-  <div class="agent-tree">
+  <div class="file-tree">
     <button
       type="button"
-      class="agent-tree__dir"
+      class="file-tree__dir"
       :aria-expanded="open"
       @click="open = !open"
     >
       <span
-        class="agent-tree__caret"
-        :class="{ 'agent-tree__caret--open': open }"
+        class="file-tree__caret"
+        :class="{ 'file-tree__caret--open': open }"
       >&#9656;</span>
       {{ node.name }}
     </button>
 
     <div
       v-if="open"
-      class="agent-tree__children"
+      class="file-tree__children"
     >
-      <AgentFileTree
+      <FileTree
         v-for="child in node.dirs"
         :key="child.path"
         :node="child"
@@ -67,8 +67,8 @@ export default {
         v-for="file in node.files"
         :key="file.path"
         type="button"
-        class="agent-tree__file"
-        :class="{ 'agent-tree__file--current': file.path === current }"
+        class="file-tree__file"
+        :class="{ 'file-tree__file--current': file.path === current }"
         @click="$emit('select', file.path)"
       >
         {{ file.name }}
@@ -78,7 +78,7 @@ export default {
 </template>
 
 <style lang="scss" scoped>
-.agent-tree {
+.file-tree {
   &__dir,
   &__file {
     display:     block;
@@ -112,8 +112,11 @@ export default {
     // Directories are structure and files are content, so the files carry the code font.
     font-family: monospace;
 
+    // A different colour from the selected row below, not the same one. They were both
+    // --accent-btn, which meant the row under the pointer and the file actually open looked
+    // identical and the tree appeared to select things it had not.
     &:hover {
-      background: var(--accent-btn);
+      background: var(--nav-hover, var(--accent-btn));
     }
 
     &--current {
