@@ -46,7 +46,11 @@ export default function(plugin: IPlugin): void {
   // which was which. NavHeaderRight renders a component of ours instead, so the
   // buttons can carry their names. See components/HeaderButtons.vue for what
   // that slot costs.
-  plugin.register('component', 'NavHeaderRight', HeaderButtons);
+  // Cast because the shell types register()'s third argument as `Function | Boolean`, which is
+  // the signature for the other things it registers rather than for a component: a Vue options
+  // object is neither, and the same call is what every extension makes to fill a slot. The dev
+  // server transpiles without checking, so this only ever surfaces in `yarn build-pkg`.
+  plugin.register('component', 'NavHeaderRight', HeaderButtons as any);
 
   // Override the core /prefs route with a wrapper that renders the original
   // page plus an "Enable Barn" checkbox (see pages/prefs.vue). The core

@@ -48,6 +48,12 @@
     "**/*.vue"
   ],
   "exclude": [
-    "../../node_modules"
+    "../../node_modules",
+    // The DevExtension is a separate dashboard package that happens to live in this directory,
+    // because this package plants it in the cluster from a seed baked into its own bundle. It is
+    // never imported from here (only the generated seed is, and that is a file of strings), so
+    // compiling it as part of this package type-checks it against the wrong tsconfig: its own is
+    // dev-extension/tsconfig.json, and scripts/check-dev-extension.mjs is what runs it.
+    "dev-extension"
   ]
 }
