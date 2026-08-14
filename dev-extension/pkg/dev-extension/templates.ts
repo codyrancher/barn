@@ -230,9 +230,13 @@ export const TEMPLATES: DevTemplate[] = [
     // clone and another install, which is the difference between a workspace and a demo.
     hostPath:      '/var/lib/rancher/dev-workspaces',
     env:           {
-      // What the dashboard talks to. The in-cluster Service for the Rancher this pod is
-      // already inside, so nothing here has to know a hostname.
-      API:          'https://rancher.cattle-system.svc',
+      // What the dashboard talks to: this workspace's own Rancher, from the moment the workspace
+      // exists, whether or not that Rancher has been started yet. Never the Rancher this product
+      // runs in. A workspace at its own origin publishes a node port straight to this dev server,
+      // and a dev server proxying to the host cluster's API is a way into that cluster from the
+      // node's address; pointed at its own sidecar it refuses the connection until the sidecar is
+      // there. See substituteTemplateEnv.
+      API:          '{{ownRancher}}',
       NODE_OPTIONS: '--max_old_space_size=4096',
       // Where this dev server is reached, which its config turns into the router base, the
       // websocket path and the rest. `{{proxyPath}}` is substituted when the Deployment is

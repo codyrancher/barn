@@ -38,7 +38,19 @@ max_deletes=10
 for arg in "$@"; do
   case "$arg" in
     --no-wait) wait_for_compile=false ;;
-    --allow-deletes=*) max_deletes="${arg#*=}" ;;
+    --allow-deletes=*)
+      max_deletes="${arg#*=}"
+      # Validated here rather than where it is compared. `[ "$n" -gt "$max" ]` exits 2 on anything
+      # that is not an integer, and `if` reads a 2 as false, so --allow-deletes=abc, an empty
+      # value, 0x5 and 1e9 each silently permitted every delete on offer. The realistic way in is
+      # --allow-deletes=$N from a wrapper where N was never set, which is the empty case.
+      case "$max_deletes" in
+        ''|*[!0-9]*)
+          echo "--allow-deletes needs a whole number, got '${max_deletes}'" >&2
+          exit 2
+          ;;
+      esac
+      ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -65,6 +77,25 @@ fi
 # Where the compile log is now, so the wait below reads only what this sync
 # caused rather than the last success from ten minutes ago.
 before=$(kubectl -n "$NAMESPACE" logs "$pod" -c "$CONTAINER" 2>/dev/null | wc -l)
+
+MANIFEST=/app/.dev-extension-sync-manifest
+
+# LC_ALL for `sort` and `comm`, which have to agree with each other about order.
+export LC_ALL=C
+
+# What this run is pushing, worked out before anything is sent, because it is also what decides
+# the deletes and an empty one has to stop the whole run rather than only the delete step.
+#
+# -prune on node_modules and dot directories, so an install inside the package cannot put tens of
+# thousands of files into a list this script acts on.
+pushed=$(cd "$SOURCE" && find pkg/dev-extension \
+  \( -name node_modules -o -name '.*' \) -prune -o \
+  -type f \( -name '*.ts' -o -name '*.vue' -o -name '*.js' \) -print | sort)
+
+if [ -z "$pushed" ]; then
+  echo "refusing to touch the pod: the local listing of pkg/dev-extension is empty" >&2
+  exit 1
+fi
 
 echo "syncing pkg/dev-extension -> $pod"
 # node_modules is excluded rather than pushed: nothing in the pod reads a copy under the package,
@@ -98,24 +129,29 @@ tar -C "$SOURCE" --exclude=node_modules -cf - pkg/dev-extension |
 # a file made in the pod is not a candidate, node_modules is not a candidate, and an empty or
 # unreadable manifest means nothing is deleted rather than everything. The first sync after this
 # change deletes nothing and writes the manifest; the one after a deletion acts on it.
-MANIFEST=/app/.dev-extension-sync-manifest
-
-# LC_ALL for `sort` and `comm`, which have to agree with each other about order.
-export LC_ALL=C
-
-# -prune on node_modules and dot directories, so an install inside the package cannot put tens of
-# thousands of files into a list this script is about to act on.
-pushed=$(cd "$SOURCE" && find pkg/dev-extension \
-  \( -name node_modules -o -name '.*' \) -prune -o \
-  -type f \( -name '*.ts' -o -name '*.vue' -o -name '*.js' \) -print | sort)
-
-if [ -z "$pushed" ]; then
-  echo "refusing to touch the pod: the local listing of pkg/dev-extension is empty" >&2
-  exit 1
-fi
-
+# The manifest lives in the pod, in a file the pod's own user can write, so it is input rather
+# than fact. Every line has to look like a source file inside the package before it can become an
+# argument to rm: anything absolute, anything with a .. in it, anything outside pkg/dev-extension
+# and anything that is not a source file is dropped. Trusting a listing this script had not
+# checked is the exact fault the tree diff had.
 previous=$(kubectl -n "$NAMESPACE" exec "$pod" -c "$CONTAINER" -- \
-  sh -c "cat $MANIFEST 2>/dev/null" 2>/dev/null | LC_ALL=C sort || true)
+  sh -c "cat $MANIFEST 2>/dev/null" 2>/dev/null |
+  grep -E '^pkg/dev-extension/[A-Za-z0-9._/-]+\.(ts|vue|js)$' |
+  grep -v '\.\.' |
+  LC_ALL=C sort || true)
+
+# R4: files this script pushed before it kept a manifest are invisible to the diff above, so they
+# are reported rather than left to be discovered by a fresh pod that cannot compile.
+there=$(kubectl -n "$NAMESPACE" exec "$pod" -c "$CONTAINER" -- \
+  sh -c "cd /app && find pkg/dev-extension \( -name node_modules -o -name '.*' \) -prune -o -type f \( -name '*.ts' -o -name '*.vue' -o -name '*.js' \) -print" 2>/dev/null |
+  LC_ALL=C sort || true)
+orphans=$(comm -13 <(printf '%s\n' "$pushed") <(printf '%s\n' "$there") | comm -13 <(printf '%s\n' "$previous") - || true)
+
+if [ -n "$orphans" ]; then
+  echo "in the pod and not in this repo, and not something this script pushed:" >&2
+  printf '%s\n' "$orphans" | sed 's/^/  /' >&2
+  echo "if they are stale, remove them by hand; nothing here will." >&2
+fi
 
 if [ -n "$previous" ]; then
   gone=$(comm -13 <(printf '%s\n' "$pushed") <(printf '%s\n' "$previous"))
@@ -136,10 +172,12 @@ if [ -n "$previous" ]; then
     echo "removing $count file(s) this script previously pushed and the repo no longer has:"
     printf '%s\n' "$gone" | sed 's/^/  /'
     # As the pod's own user, like the untar above, rather than as root.
-    printf '%s\n' "$gone" |
+    # NUL-separated. A path with a space in it is two arguments to a bare xargs, so the file
+    # itself is never removed and two names that do not exist are, silently.
+    printf '%s\n' "$gone" | tr '\n' '\0' |
       kubectl -n "$NAMESPACE" exec -i "$pod" -c "$CONTAINER" -- \
         setpriv --reuid="$POD_UID" --regid="$POD_UID" --init-groups \
-        sh -c 'cd /app && xargs -r rm -f'
+        sh -c 'cd /app && xargs -0 -r rm -f'
   fi
 fi
 

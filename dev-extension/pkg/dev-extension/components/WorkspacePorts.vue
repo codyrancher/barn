@@ -7,10 +7,12 @@
 // Kubernetes service proxy already puts every Service port on Rancher's own origin. So this
 // page is the Service's port list, made editable, plus the two buttons.
 //
-// What it deliberately does not do is publish anything outside Rancher. A NodePort or an
-// Ingress would do that, and it is a different thing with different consequences (open to
-// whoever can reach the node, rather than to whoever has a session), so it is described below
-// rather than hidden behind Share.
+// Whether a port is published outside Rancher is the template's decision, not this page's. A
+// template that has to be served at its own origin gets a NodePort (see DevTemplate.ownOrigin),
+// and for those workspaces the port the template declares really is reachable without a Rancher
+// session. This page says which of the two each row is rather than claiming the same thing about
+// all of them, because it used to tell people a node port was not built while one was open on the
+// very port in the row.
 import SortableTable from '@shell/components/SortableTable';
 import AsyncButton from '@shell/components/AsyncButton';
 import { Banner } from '@components/Banner';
@@ -18,7 +20,7 @@ import { RcButton } from '@components/RcButton';
 import { LabeledInput } from '@components/Form/LabeledInput';
 import {
   listWorkspacePorts, addWorkspacePort, removeWorkspacePort, portError,
-  workspaceProxyUrl, workspaceServing
+  workspaceProxyUrl, workspaceServing, workspaceService, workspaceOriginUrl
 } from '../api';
 import { templateById } from '../templates';
 
@@ -43,6 +45,8 @@ export default {
   data() {
     return {
       ports:    [],
+      // The workspace's Service as it is, which is where the node port comes from.
+      service:  null,
       // port -> true once something answered on it. A Service can route to a port nothing is
       // listening on, and saying so is the difference between "you have not started it yet"
       // and "this is broken".
@@ -65,6 +69,9 @@ export default {
         },
         {
           name: 'url', label: 'Address', value: 'port'
+        },
+        {
+          name: 'reach', label: 'Who can open it', value: 'port', width: 160
         },
         {
           name: 'actions', label: '', align: 'right', width: 210
@@ -91,6 +98,7 @@ export default {
   methods: {
     async refresh() {
       this.ports = await listWorkspacePorts(this.workspace.name);
+      this.service = await workspaceService(this.workspace.name).catch(() => null);
       await this.checkServing();
     },
 
@@ -110,18 +118,41 @@ export default {
       this.serving = Object.fromEntries(this.ports.map((entry, i) => [entry.port, answers[i]]));
     },
 
+    /**
+     * The address of one port, which is not the same kind of address for every row.
+     *
+     * The template's own port on an own-origin workspace is published on the node, and that is
+     * where it has to be opened: through the service proxy the dashboard it serves loads at the
+     * wrong base and navigates the tab out to this Rancher instead. Every other port is the
+     * service proxy, on this origin, behind this session.
+     */
+    onNode(port) {
+      const template = templateById(this.workspace.template);
+
+      return !!template?.ownOrigin && port === template.port && !!this.service?.nodePort;
+    },
+
     url(port) {
       // The template's port speaks the template's scheme; a port added by hand is http until
       // there is a reason to ask which.
       const template = templateById(this.workspace.template);
       const scheme = port === template?.port ? template?.scheme : 'http';
 
-      return workspaceProxyUrl(this.workspace.name, port, scheme);
+      return this.onNode(port)
+        ? workspaceOriginUrl(this.service)
+        : workspaceProxyUrl(this.workspace.name, port, scheme);
     },
 
     /** The address as somebody else would have to type it, which is what goes on the clipboard. */
     absoluteUrl(port) {
-      return `${ window.location.origin }${ this.url(port) }`;
+      const url = this.url(port);
+
+      return url.startsWith('http') ? url : `${ window.location.origin }${ url }`;
+    },
+
+    /** Who can open this row's address, in one word for the table. */
+    reach(port) {
+      return this.onNode(port) ? 'Anyone on the node' : 'Rancher session';
     },
 
     async add(done) {
@@ -197,6 +228,10 @@ export default {
         <span class="workspace-ports__url">{{ url(row.port) }}</span>
       </template>
 
+      <template #cell:reach="{ row }">
+        <span :class="onNode(row.port) ? 'text-warning' : 'text-muted'">{{ reach(row.port) }}</span>
+      </template>
+
       <template #cell:actions="{ row }">
         <div class="workspace-ports__actions">
           <RcButton
@@ -257,12 +292,12 @@ export default {
     </div>
 
     <p class="workspace-ports__note">
-      Share puts the address on your clipboard. It is a Rancher address, not a public one:
-      whoever you send it to can open it if they have a session on this Rancher with access to
-      the <b>{{ workspace.namespace }}</b> namespace, and cannot open it otherwise. There is no
-      link here that works without one. That would be a NodePort or an Ingress on the
-      workspace's Service, which publishes it to anyone who can reach the node, and it is not
-      built.
+      Share puts the address on your clipboard, and the table says who can open what it copied.
+      A <b>Rancher session</b> address goes through this Rancher: whoever you send it to can open
+      it if they have a session here with access to the <b>{{ workspace.namespace }}</b> namespace,
+      and cannot open it otherwise. An <b>Anyone on the node</b> address is a node port on the
+      workspace's Service, with no session in front of it, which is what this workspace's template
+      needs in order to serve a dashboard that talks to its own Rancher rather than to this one.
     </p>
   </div>
 </template>

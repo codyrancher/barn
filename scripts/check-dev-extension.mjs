@@ -6,12 +6,19 @@
 // error or an import of a module that is not there. Two passes here, and the second is the one
 // that matters most, because it covers what the first cannot:
 //
-//   1. tsc over pkg/dev-extension. It sees only the `.ts` files: `@rancher/shell` declares
+//   1. tsc over pkg/dev-extension. It sees only the 13 `.ts` files: `@rancher/shell` declares
 //      `module '*.vue'`, so every import of a component resolves to a wildcard and none of the 19
-//      `.vue` files enters the program at all. It also has to be told which type roots to use,
-//      because the package's tsconfig names `cypress` and `jest`, neither of them installed, and
-//      an unresolved entry in `types` is an options-level diagnostic that makes tsc skip semantic
+//      `.vue` files enters the program. It also has to be told which type roots to use, because
+//      the package's tsconfig names `cypress` and `jest`, neither of them installed, and an
+//      unresolved entry in `types` is an options-level diagnostic that makes tsc skip semantic
 //      checking entirely and report nothing else.
+//
+//      What that leaves unchecked, stated plainly rather than implied: **no type checking happens
+//      inside a `.vue` file**. Every one of the 19 has a plain `<script>` block, so its contents
+//      are JavaScript and carry no type annotations for a checker to verify; running vue-tsc over
+//      them adds nothing but the resolution of their imports, which is what pass 2 does directly
+//      and without needing the whole shell to typecheck. If a component is ever written with
+//      `<script lang="ts">`, that stops being true and this needs vue-tsc.
 //   2. a resolver pass over every relative import in every `.ts` and `.vue`. This is the one that
 //      would have caught `pages/Workspaces.vue` importing `../nav`, a module deleted from the repo
 //      and still present in the pod: green in the pod, and a build failure on any fresh checkout.
@@ -95,7 +102,10 @@ function unresolvedImports() {
 
       const target = path.resolve(path.dirname(file), specifier);
 
-      if (!EXTENSIONS.some((extension) => fs.existsSync(target + extension))) {
+      // A file, not merely a path that exists. `existsSync` is true for a directory, so an import
+      // of `../components` resolved against the directory itself and was reported as fine when
+      // nothing there could have been loaded.
+      if (!EXTENSIONS.some((extension) => fs.statSync(target + extension, { throwIfNoEntry: false })?.isFile())) {
         problems.push(`${ path.relative(ROOT, file) }: imports '${ specifier }', which is not on disk`);
       }
     }
@@ -145,4 +155,7 @@ if (problems.length) {
   process.exit(1);
 }
 
-console.log(`checks passed: ${ sources(PKG).length } files, imports resolved, types clean`);
+const files = sources(PKG);
+const vue = files.filter((file) => file.endsWith('.vue')).length;
+
+console.log(`checks passed: ${ files.length } files, every relative import resolves, types clean in the ${ files.length - vue } .ts files (the ${ vue } .vue files are JavaScript, so only their imports are checked)`);

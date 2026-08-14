@@ -397,6 +397,28 @@ export async function getWorkspace(name: string): Promise<DevWorkspace | null> {
   return workspaceFrom(record, deployment, pod);
 }
 
+/**
+ * The two things a template's environment cannot know until it is a workspace.
+ *
+ * `{{proxyPath}}` is where this dev server is reached, which is empty for a workspace served at
+ * its own origin. `{{ownRancher}}` is the in-cluster address of the Rancher this workspace's own
+ * sidecar serves, and it is written in from the moment the workspace is created rather than
+ * swapped in when the sidecar starts.
+ *
+ * That ordering is the whole point. A workspace at its own origin publishes a node port, and the
+ * dev server behind it proxies /v1 and /v3 to whatever API names. Pointed at the host by default,
+ * that is an unauthenticated path from the node's address into the cluster this product runs in,
+ * open for as long as nobody has started the workspace's own Rancher. Pointed at its own Rancher
+ * from the start, the worst it can do before that Rancher exists is refuse the connection.
+ */
+function substituteTemplateEnv(value: string, name: string, template: DevTemplate): string {
+  const owns = (template.sidecars || []).find((sidecar) => sidecar.providesApi);
+
+  return value
+    .replace('{{proxyPath}}', template.ownOrigin ? '' : workspaceProxyUrl(name, template.port, template.scheme))
+    .replace('{{ownRancher}}', owns ? sidecarServiceUrl(name, owns) : '');
+}
+
 function deploymentBody(name: string, template: DevTemplate): Json {
   const namespace = workspaceNamespace(name);
   const labels = { app: namespace, [LABEL_WORKSPACE]: name, [LABEL_TEMPLATE]: template.id };
@@ -427,7 +449,7 @@ function deploymentBody(name: string, template: DevTemplate): Json {
             // is reached at, which contains its own name.
             env:   Object.entries(template.env || {}).map(([envName, value]) => ({
               name:  envName,
-              value: value.replace('{{proxyPath}}', template.ownOrigin ? '' : workspaceProxyUrl(name, template.port, template.scheme)),
+              value: substituteTemplateEnv(value, name, template),
             })),
             // The workspace's own secrets, by reference and as a whole Secret rather than key by
             // key. A named list would be fixed at create time, so a key added in Settings later
@@ -559,8 +581,9 @@ export async function createWorkspace(name: string, templateId: string): Promise
 
   // Before the Deployment, so the pod's first start already has whatever is in the store. It is
   // rewritten on every start as well, since the store can change after this.
-  await ensureGeneratedSecrets(template);
-  await mirrorSecrets(name, template);
+  const store = await ensureGeneratedSecrets(template);
+
+  await mirrorSecrets(name, template, store);
 
   await devFetch(`${ BASE }/v1/apps.deployments`, {
     method: 'POST',
@@ -569,21 +592,32 @@ export async function createWorkspace(name: string, templateId: string): Promise
 
   await devFetch(`${ BASE }/v1/services`, {
     method: 'POST',
-    body:   JSON.stringify({
-      apiVersion: 'v1',
-      kind:       'Service',
-      metadata:   { namespace, name: namespace, labels },
-      spec:       {
-        // NodePort rather than ClusterIP when the template needs an origin of its own, which is
-        // the whole of what "its own origin" costs: the port is open on the node to anyone who
-        // can reach it, with no Rancher session in front of it. The Browser tab says so where it
-        // offers the link.
-        ...(template.ownOrigin ? { type: 'NodePort' } : {}),
-        selector: { app: namespace },
-        ports:    [{ name: 'http', port: template.port, targetPort: 'http' }],
-      },
-    }),
+    body:   JSON.stringify(workspaceServiceBody(name, template)),
   });
+}
+
+/**
+ * The workspace's Service.
+ *
+ * NodePort rather than ClusterIP when the template needs an origin of its own, which is the whole
+ * of what "its own origin" costs: the port is open on the node to anyone who can reach it, with no
+ * Rancher session in front of it. The Browser tab says so where it offers the link, and the
+ * workspace's API address is its own Rancher rather than this cluster's precisely because of it.
+ */
+function workspaceServiceBody(name: string, template: DevTemplate): Json {
+  const namespace = workspaceNamespace(name);
+  const labels = { [LABEL_WORKSPACE]: name, [LABEL_TEMPLATE]: template.id };
+
+  return {
+    apiVersion: 'v1',
+    kind:       'Service',
+    metadata:   { namespace, name: namespace, labels },
+    spec:       {
+      ...(template.ownOrigin ? { type: 'NodePort' } : {}),
+      selector: { app: namespace },
+      ports:    [{ name: 'http', port: template.port, targetPort: 'http' }],
+    },
+  };
 }
 
 /**
@@ -605,9 +639,8 @@ export async function setWorkspaceRunning(name: string, running: boolean): Promi
 
     await mirrorSecrets(name, template);
     // And the same moment is when a workspace made before this version of the product can be
-    // brought into line: its dev server config and, if its template now asks for an origin of its
-    // own, its Service and its prefix. All three are read when the pod starts and only then.
-    await ensureWorkspaceOrigin(name, template, deployment);
+    // brought into line, since all of it is read when the pod starts and only then.
+    await bringWorkspaceUpToDate(name, template);
   }
 
   deployment.spec.replicas = running ? 1 : 0;
@@ -653,39 +686,84 @@ async function ensureWorkspaceConfig(name: string): Promise<void> {
   await devFetch(url, { method: 'PUT', body: JSON.stringify({ ...existing, data }) });
 }
 
-async function ensureWorkspaceOrigin(name: string, template: DevTemplate | undefined, deployment: Json): Promise<void> {
+/**
+ * Everything about a workspace that this product has since changed its mind about, applied.
+ *
+ * Called from both places a workspace's pod is about to start or restart, which is the only
+ * moment any of it can take effect: starting the workspace, and starting the Rancher sidecar that
+ * restarts it. Having it on only one of those is how starting a sidecar came to give somebody a
+ * restarted workspace that was still in proxy mode with its dashboard calling the host.
+ *
+ * It reads and writes the Deployment itself rather than taking one, because its two callers reach
+ * it from different directions, and it only writes when something is actually different, so a
+ * workspace that is already right is not restarted for nothing.
+ */
+async function bringWorkspaceUpToDate(name: string, template: DevTemplate | undefined): Promise<void> {
+  const namespace = workspaceNamespace(name);
+
   await ensureWorkspaceConfig(name);
+  await ensureWorkspaceService(name, template);
 
-  const workspaceContainer = deployment?.spec?.template?.spec?.containers?.[0];
+  const url = `${ BASE }/v1/apps.deployments/${ namespace }/${ namespace }`;
+  const deployment = await devFetch(url).catch(() => null);
+  const container = deployment?.spec?.template?.spec?.containers?.[0];
 
-  // A workspace created before the mirror existed has no reference to it, so nothing in it ever
-  // sees a secret however many times the mirror is rewritten. Added here rather than left to a
-  // recreate, since this is the moment the pod is about to read its environment anyway.
-  if (workspaceContainer && !workspaceContainer.envFrom) {
-    workspaceContainer.envFrom = [{ secretRef: { name: MIRROR_SECRET, optional: true } }];
+  if (!container) {
+    return;
   }
 
-  if (!template?.ownOrigin) {
+  let changed = false;
+
+  // A workspace created before the mirror existed has no reference to it, so nothing in it ever
+  // sees a secret however many times the mirror is rewritten.
+  if (!container.envFrom) {
+    container.envFrom = [{ secretRef: { name: MIRROR_SECRET, optional: true } }];
+    changed = true;
+  }
+
+  // The environment its template describes today, which is where the API address lives.
+  for (const [envName, value] of Object.entries(template?.env || {})) {
+    const wanted = substituteTemplateEnv(value, name, template!);
+    const entry = (container.env || []).find((candidate: Json) => candidate.name === envName);
+
+    if (entry && entry.value !== wanted) {
+      entry.value = wanted;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    await devFetch(url, { method: 'PUT', body: JSON.stringify(deployment) });
+  }
+}
+
+/**
+ * The workspace's Service: present, and of the type its template needs.
+ *
+ * Created here as well as at create time, because a create that failed after the namespace left a
+ * workspace permanently without one and nothing ever put it back.
+ */
+async function ensureWorkspaceService(name: string, template: DevTemplate | undefined): Promise<void> {
+  if (!template) {
     return;
   }
 
   const namespace = workspaceNamespace(name);
-  const serviceUrl = `${ BASE }/v1/services/${ namespace }/${ namespace }`;
-  const service = await devFetch(serviceUrl).catch(() => null);
+  const url = `${ BASE }/v1/services/${ namespace }/${ namespace }`;
+  const service = await devFetch(url).catch(() => null);
 
-  if (service && service.spec?.type !== 'NodePort') {
-    service.spec.type = 'NodePort';
-    await devFetch(serviceUrl, { method: 'PUT', body: JSON.stringify(service) });
+  if (!service) {
+    await devFetch(`${ BASE }/v1/services`, {
+      method: 'POST',
+      body:   JSON.stringify(workspaceServiceBody(name, template)),
+    }).catch(() => null);
+
+    return;
   }
 
-  const container = deployment?.spec?.template?.spec?.containers?.[0];
-  const prefix = (container?.env || []).find((entry: Json) => entry.name === 'DEV_PROXY_PATH');
-
-  // Written into the object the caller is about to PUT, rather than in a PUT of its own: this
-  // runs inside setWorkspaceRunning, which is already doing a read-modify-write of the same
-  // Deployment, and two writes would be two rollouts.
-  if (prefix && prefix.value !== '') {
-    prefix.value = '';
+  if (template.ownOrigin && service.spec?.type !== 'NodePort') {
+    service.spec.type = 'NodePort';
+    await devFetch(url, { method: 'PUT', body: JSON.stringify(service) });
   }
 }
 
@@ -702,7 +780,9 @@ export function workspaceOriginUrl(service: DevService | null): string {
     return '';
   }
 
-  return `http://${ window.location.hostname }:${ service.nodePort }/`;
+  // https, on the dev server's own self-signed certificate. See workspace-config.ts: over http
+  // the session cookie Rancher issues is dropped and the login silently fails.
+  return `https://${ window.location.hostname }:${ service.nodePort }/`;
 }
 
 /**
@@ -1280,11 +1360,44 @@ let secretOwner = '';
  * characters can land on a dash or a dot, and a name that ends in one is rejected too.
  */
 function sanitiseOwner(value: string): string {
-  return (value || 'anonymous')
+  const cleaned = (value || 'anonymous')
     .toLowerCase()
-    .replace(/[^a-z0-9.-]/g, '-')
-    .slice(0, 40)
-    .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '') || 'anonymous';
+    .replace(/[^a-z0-9.-]/g, '-');
+  const trim = (text: string) => text.replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
+
+  if (cleaned.length <= MAX_OWNER_LENGTH) {
+    return trim(cleaned) || 'anonymous';
+  }
+
+  // Long principals keep a fingerprint of the whole thing rather than only their first forty
+  // characters. Active Directory principals are a distinguished name, so two people in the same
+  // organisational unit agree for far longer than that: truncated, they become one Secret, and
+  // the second person to save silently overwrites the first person's tokens and then reads them.
+  // On exactly the providers the auth sidecars exist to make usable.
+  const stem = cleaned.slice(0, MAX_OWNER_LENGTH - 9);
+
+  return `${ trim(stem) }-${ fingerprint(value) }`;
+}
+
+/** Kubernetes' name limit is 63; this leaves room for the `dev-secrets-` the store prefixes. */
+const MAX_OWNER_LENGTH = 40;
+
+/**
+ * A short, stable fingerprint of a string, as lowercase base 36.
+ *
+ * FNV-1a, because it needs to be synchronous (SubtleCrypto is not) and it is disambiguating
+ * names rather than protecting anything. Eight characters of it is enough that two principals
+ * sharing a forty character prefix do not also share this.
+ */
+function fingerprint(value: string): string {
+  let hash = 0x811c9dc5;
+
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+
+  return hash.toString(36).padStart(7, '0').slice(0, 8);
 }
 
 /** Who is asking, from Rancher's own answer, cached for the life of the page. */
@@ -1404,17 +1517,18 @@ function generatedValue(length = 15): string {
  * it stays, which is the property `lookup` gives the chart: something that has been used to log
  * in once goes on working.
  */
-export async function ensureGeneratedSecrets(template: DevTemplate | undefined): Promise<void> {
+export async function ensureGeneratedSecrets(template: DevTemplate | undefined): Promise<Record<string, string>> {
   const declared = [
     ...GLOBAL_SECRETS.map((secret) => ({ secret, key: secret.key })),
     ...(template?.secrets || []).map((secret) => ({ secret, key: templateSecretKey(template!.id, secret.key) })),
   ].filter(({ secret }) => secret.generated);
 
+  const store = await readSecretStore();
+
   if (!declared.length) {
-    return;
+    return store;
   }
 
-  const store = await readSecretStore();
   const changes: Record<string, string> = {};
 
   for (const { key } of declared) {
@@ -1424,6 +1538,16 @@ export async function ensureGeneratedSecrets(template: DevTemplate | undefined):
   }
 
   await saveSecrets(changes);
+
+  // The store as it now is, returned rather than left to be read back.
+  //
+  // Reading it again is a read of something written a moment ago, and the very first write is a
+  // create: Steve can answer that read from before it and hand back a store without the key just
+  // generated. What follows is a mirror written without it, a pod started without it, a Rancher
+  // installed with an empty password that therefore invents one of its own, and a bootstrap that
+  // cannot log in. That is a great deal of consequence for a cache, and none of it happens if the
+  // value is carried forward instead of asked for again.
+  return { ...store, ...changes };
 }
 
 /**
@@ -1443,9 +1567,11 @@ export async function ensureGeneratedSecrets(template: DevTemplate | undefined):
  * overlooked: they are that workspace's credentials, and the code they are for is what runs
  * there. A secret that must not be readable by the workspace does not belong in its template.
  */
-async function mirrorSecrets(workspace: string, template: DevTemplate | undefined): Promise<void> {
+async function mirrorSecrets(workspace: string, template: DevTemplate | undefined, known?: Record<string, string>): Promise<void> {
   const namespace = workspaceNamespace(workspace);
-  const store = await readSecretStore();
+  // `known` is the store as the caller has just seen it, which is what stops a value generated
+  // moments ago from being lost to a stale read. See ensureGeneratedSecrets.
+  const store = known || await readSecretStore();
   const mirrored: Record<string, string> = {};
 
   // Only the template's own keys, never the global ones. A global secret is the person's rather
@@ -1699,51 +1825,6 @@ export function sidecarServiceUrl(workspace: string, sidecar: DevSidecar): strin
 }
 
 /**
- * Point the workspace's dashboard at a Rancher, and restart it so it takes.
- *
- * The template's `API` is the Rancher this cluster belongs to, which was the only answer while
- * there was no other. Once the workspace has a Rancher of its own, leaving it talking to the host
- * is the whole feature not happening: a dashboard pointed at somebody else's cluster is what it
- * already was.
- *
- * Writing the env is what restarts the pod, since a change to the pod template is a rollout, and
- * the workspace's strategy is Recreate. Nothing is lost by it: the checkout and node_modules are
- * on a hostPath that outlives the pod. What is lost is a running dev server for as long as it
- * takes to compile again, which is why this happens on the start and the stop of the sidecar
- * rather than continuously.
- */
-export async function setWorkspaceApi(workspace: string, api: string): Promise<void> {
-  const namespace = workspaceNamespace(workspace);
-  const url = `${ BASE }/v1/apps.deployments/${ namespace }/${ namespace }`;
-  const deployment = await devFetch(url).catch(() => null);
-  const container = deployment?.spec?.template?.spec?.containers?.[0];
-
-  if (!container) {
-    return;
-  }
-
-  const env = container.env || [];
-  const existing = env.find((entry: Json) => entry.name === 'API');
-
-  // Unchanged is left alone rather than written back, because writing it back would restart the
-  // workspace for nothing every time a sidecar is restarted.
-  if (existing?.value === api) {
-    return;
-  }
-
-  container.env = existing
-    ? env.map((entry: Json) => (entry.name === 'API' ? { name: 'API', value: api } : entry))
-    : [...env, { name: 'API', value: api }];
-
-  await devFetch(url, { method: 'PUT', body: JSON.stringify(deployment) });
-}
-
-/** What the workspace's dashboard talks to when it has no Rancher of its own. */
-export function templateApi(template: DevTemplate | undefined): string {
-  return template?.env?.API || '';
-}
-
-/**
  * Start a sidecar, creating it the first time.
  *
  * Three things happen before either path, and all three have to happen on both, which is what
@@ -1765,13 +1846,16 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
   const url = `${ BASE }/v1/apps.deployments/${ namespace }/${ name }`;
 
   await ensureWorkspaceRbac(workspace);
-  await ensureGeneratedSecrets(template);
+
+  // The store as it stands once anything generated has been filled in, carried from here rather
+  // than read again at each step. See ensureGeneratedSecrets.
+  const store = await ensureGeneratedSecrets(template);
 
   // Refused rather than started without it. The reference is `optional`, so a sidecar started
   // without a key it declared comes up, answers nothing and looks healthy, which is the failure
   // this is here to make impossible. The card disables Start for the same reason; this is the
   // half that a second tab or a stale page cannot get around.
-  const keys = await setSecretKeys();
+  const keys = Object.entries(store).filter(([, value]) => !!value).map(([key]) => key);
   const missing = missingSecrets(sidecar, template, keys)
     .filter((key) => (template.secrets || []).find((secret) => secret.key === key)?.required !== false);
 
@@ -1779,7 +1863,20 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
     throw new Error(`${ sidecar.label } needs ${ missing.join(', ') }, which is not set. Set it in Settings first.`);
   }
 
-  await mirrorSecrets(workspace, template);
+  await mirrorSecrets(workspace, template, store);
+
+  // Every key this sidecar declared, present in the store the mirror was just written from.
+  //
+  // The reference is optional, so a key that did not make it arrives as an empty variable and the
+  // container carries on with it. For a generated password that means the thing it protects is
+  // installed with no password at all, and the failure surfaces minutes later as a login that
+  // cannot succeed and a reset that has nothing to reset to. Checked here, where it is still a
+  // sentence rather than a mystery.
+  const blank = (sidecar.secrets || []).filter((key) => !store[templateSecretKey(template.id, key)]);
+
+  if (blank.length) {
+    throw new Error(`${ sidecar.label } cannot be started: ${ blank.join(', ') } has no value in the secret store.`);
+  }
 
   // Both of these are rewritten on every start, not created once. A script edited in this repo
   // has to reach a sidecar that already exists, and a manager's rights have to be there before
@@ -1787,11 +1884,11 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
   await ensureSidecarScripts(workspace, sidecar);
   await ensureManagerRbac(workspace, sidecar);
 
-  // The changeover this sidecar exists for. Before the scale, so the workspace's next pod already
-  // talks to it; the workspace restarts on the patch and comes back pointed at its own Rancher.
-  if (sidecar.providesApi) {
-    await setWorkspaceApi(workspace, sidecarServiceUrl(workspace, sidecar));
-  }
+  // The workspace itself, brought up to date. A workspace made before its template asked for an
+  // origin of its own is still in proxy mode, and starting its Rancher is exactly the moment
+  // somebody expects that to have been sorted out: without this they get a restart and a
+  // workspace whose dashboard still calls the Rancher this page is served from.
+  await bringWorkspaceUpToDate(workspace, template);
 
   const existing = await devFetch(url).catch(() => null);
 
@@ -1952,14 +2049,11 @@ export async function stopSidecar(workspace: string, id: string, template?: DevT
   deployment.spec.replicas = 0;
   await devFetch(url, { method: 'PUT', body: JSON.stringify(deployment) });
 
-  // The other half of the changeover. A workspace left pointing at a Rancher that has been stopped
-  // is a dashboard that cannot load, and the honest fallback is where it pointed before: the
-  // Rancher this cluster belongs to.
-  const sidecar = (template?.sidecars || []).find((entry) => entry.id === id);
-
-  if (sidecar?.providesApi && templateApi(template)) {
-    await setWorkspaceApi(workspace, templateApi(template));
-  }
+  // Nothing to put back. The workspace is pointed at this sidecar's address from the day it was
+  // created, so stopping it leaves a dashboard whose API refuses the connection, which is the
+  // truth. The version that swapped the address to the host on stop restarted the workspace twice
+  // per Restart and, in between, pointed a published node port at the host cluster's API.
+  void template;
 }
 
 /** Where a sidecar's own UI is served, on Rancher's origin, the same door a workspace uses. */

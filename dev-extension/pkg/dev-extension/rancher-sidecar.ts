@@ -89,6 +89,19 @@ export const MANAGE_SCRIPT = `#!/bin/sh
 set -x
 apk add --no-cache socat curl || true
 
+# Nothing is installed without a password to install it with.
+#
+# The reference to it is optional, so an absent or cleared key arrives as an empty variable rather
+# than a failure to start. Rancher would then be installed with an empty bootstrapPassword, which
+# makes it generate one of its own, and everything downstream would be trying to log in with a
+# password that Rancher has never heard of. Refusing here is the difference between a sidecar that
+# says what is wrong and a Rancher nobody can get into.
+if [ -z "$CATTLE_BOOTSTRAP_PASSWORD" ]; then
+  echo "refusing to install: RANCHER_BOOTSTRAP_PASSWORD is not set in the secret store"
+  echo "set it in Settings, then start this sidecar again"
+  exit 1
+fi
+
 # Watchdog (started first): a rollout's old pod runs the preStop pause and can race this pod's
 # install at any phase. Keep the vcluster scaled up while this manager lives; a real stop removes
 # the manager, so the pause sticks.
@@ -199,7 +212,15 @@ done
 # So when the login fails against a Rancher that is answering, the password is reset to the store's
 # rather than left disagreeing with it. reset-password is Rancher's own recovery path and prints
 # a working password; that is used once, to set ours, and never stored anywhere.
-if [ -z "$TOKEN" ]; then
+# Only on a considered 401, and only when there is a password to put back.
+#
+# reset-password changes the admin password to a fresh random string as a side effect of being
+# run. If that string is then not set to anything, it exists in one shell variable in one
+# container and nowhere else: not echoed, not written back, kept out of the trace by set +x. The
+# version gated on an empty token reached that from three directions - a cleared key, a 200 with
+# an unexpected body, and the loop simply running out - and each of them ended with a Rancher
+# whose password nobody had.
+if [ -z "$TOKEN" ] && [ "$CODE" = "401" ]; then
   echo "admin login failed; resetting the password to the one in the store"
   RESET=$(kubectl --kubeconfig /tmp/kc -n cattle-system exec deploy/rancher -- reset-password 2>/dev/null | tail -1 | tr -d '[:space:]')
 
@@ -214,15 +235,30 @@ if [ -z "$TOKEN" ]; then
       # collection action and answers 422 InvalidAction on a user id; setpassword is the one that
       # takes a user, and it also clears the mustChangePassword flag reset-password sets, which
       # would otherwise stop the next login at a change-your-password screen.
-      curl -sk --max-time 20 -X POST "$RURL/v3/users/$USERID?action=setpassword" \\
+      SET=$(curl -sk --max-time 20 -X POST "$RURL/v3/users/$USERID?action=setpassword" \\
         -H "Authorization: Bearer $TEMP" -H 'content-type: application/json' \\
         -d "{\\"newPassword\\":\\"$CATTLE_BOOTSTRAP_PASSWORD\\"}" \\
-        -o /dev/null -w "password reset %{http_code}\\n"
-      CODE=$(login "$CATTLE_BOOTSTRAP_PASSWORD")
+        -o /dev/null -w '%{http_code}')
+      echo "password reset $SET"
 
-      if [ "$CODE" = "200" ] || [ "$CODE" = "201" ]; then
-        TOKEN=$(token_from_login)
-      fi
+      # Read, not merely printed. A status that only ever went into curl's -w was a status nothing
+      # acted on, so a rejected setpassword looked exactly like a successful one and the admin
+      # password stayed at the value reset-password had just invented.
+      case "$SET" in
+        2*)
+          CODE=$(login "$CATTLE_BOOTSTRAP_PASSWORD")
+
+          if [ "$CODE" = "200" ] || [ "$CODE" = "201" ]; then
+            TOKEN=$(token_from_login)
+          fi
+          ;;
+        *)
+          echo "SETTING THE ADMIN PASSWORD FAILED ($SET)."
+          echo "This Rancher's admin password was changed by reset-password and is not the one in"
+          echo "the secret store. To get back in, run reset-password again and use what it prints:"
+          echo "  kubectl -n cattle-system exec deploy/rancher -- reset-password"
+          ;;
+      esac
     fi
   fi
 fi

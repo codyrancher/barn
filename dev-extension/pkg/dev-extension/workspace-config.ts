@@ -75,9 +75,16 @@ base.chainWebpack = (webpackConfig) => {
 base.devServer = {
   ...base.devServer,
 
-  // Rancher's proxy terminates TLS and will not talk to the shell's self-signed dev
-  // certificate on the way through. Plain http here, https to the browser.
-  server: { type: 'http' },
+  // Plain http only behind the proxy, where Rancher terminates TLS and will not talk to the
+  // shell's self-signed dev certificate on the way through.
+  //
+  // At its own origin the browser talks to this server directly, and http there is not a smaller
+  // problem than a certificate warning, it is a broken login: the shipped proxy sets
+  // x-forwarded-proto: https on every request it makes, so Rancher issues its session cookie with
+  // Secure, and a browser on http throws that cookie away. What that looks like is a login that
+  // returns 200 and a page that bounces straight back to the login form, which is what it did.
+  // So https here, with the shell's own certificate, and a warning to click through once.
+  ...(proxyPath ? { server: { type: 'http' } } : {}),
 
   // Requests arrive with whatever Host the proxy chain last set, never this server's own.
   // Without this the proxy answers 'Invalid Host header'.

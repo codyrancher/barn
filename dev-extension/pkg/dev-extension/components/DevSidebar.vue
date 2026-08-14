@@ -229,11 +229,16 @@ export default {
               class="dev-sidebar__link"
               :to="workspaceTo(workspace)"
             >
-              <i
+              <!--
+                The state class goes on the wrapper and the glyph reads it back through
+                currentColor, which is what lets the stylesheet adjust it for the theme without
+                knowing which state it is. See the __dot rule.
+              -->
+              <span
                 v-clean-tooltip="stateLabel(workspace)"
-                class="dev-sidebar__glyph icon icon-dot"
+                class="dev-sidebar__glyph dev-sidebar__dot"
                 :class="dotClass(workspace)"
-              />
+              ><i class="icon icon-dot" /></span>
               <span class="dev-sidebar__name">{{ workspace.name }}</span>
             </router-link>
             <button
@@ -287,11 +292,11 @@ export default {
               class="dev-sidebar__link"
               :to="workspaceTo(workspace)"
             >
-              <i
+              <span
                 v-clean-tooltip="stateLabel(workspace)"
-                class="dev-sidebar__glyph icon icon-dot"
+                class="dev-sidebar__glyph dev-sidebar__dot"
                 :class="dotClass(workspace)"
-              />
+              ><i class="icon icon-dot" /></span>
               <span class="dev-sidebar__name">{{ workspace.name }}</span>
             </router-link>
             <button
@@ -441,6 +446,23 @@ export default {
         font-size:   8px;
         line-height: 1;
       }
+    }
+
+    // The state dot, pulled toward the body text until it is legible on the body background.
+    //
+    // Rancher's state colours are not theme-aware: --success is rgb(0, 112, 50) in both themes,
+    // and only the background moves, so on the dark nav it measures 2.36:1 where a graphical
+    // object needs 3:1. --error and --primary have the same problem. There is no token to switch
+    // to either: the click-badge family is white for error and info in both themes, and the gauge
+    // colours are a different vocabulary.
+    //
+    // So the state colour is kept and mixed toward --body-text, which is the one colour each
+    // theme guarantees against its own background. In dark that lightens it, in light it deepens
+    // it, and the direction is right in both without this file knowing which theme it is in or
+    // inventing a colour of its own. A browser without color-mix ignores the declaration and gets
+    // the state colour unchanged, which is where this started.
+    &__dot .icon-dot {
+      color: color-mix(in srgb, currentColor, var(--body-text) 45%);
 
       &:hover {
         background: var(--nav-hover, var(--accent-btn));

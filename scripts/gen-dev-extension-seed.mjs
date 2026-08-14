@@ -31,6 +31,13 @@ const POD_DIR = 'pod';
 
 function walk(dir, acc = []) {
   for (const entry of fs.readdirSync(path.join(APP, dir), { withFileTypes: true })) {
+    // node_modules and dot directories are never part of the seed. One `yarn install` inside the
+    // package would otherwise bake tens of thousands of files into the extension bundle, which is
+    // the same hazard the sync script had and the same fix.
+    if (entry.name === 'node_modules' || entry.name.startsWith('.')) {
+      continue;
+    }
+
     const rel = path.posix.join(dir, entry.name);
 
     if (entry.isDirectory()) {

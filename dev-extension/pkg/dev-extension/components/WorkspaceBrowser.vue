@@ -13,7 +13,9 @@
 // their app.
 import { Banner } from '@components/Banner';
 import { RcButton } from '@components/RcButton';
-import { workspaceProxyUrl, workspaceServing, workspaceOriginUrl } from '../api';
+import {
+  workspaceProxyUrl, workspaceServing, workspaceOriginUrl, listSidecars
+} from '../api';
 import { templateById } from '../templates';
 
 // How often to look again while nothing is answering. The same beat as the terminal's wait for
@@ -49,6 +51,9 @@ export default {
       // on another origin's path cannot be told to reload, and reassigning the same src does
       // nothing.
       reloads:   0,
+      // Whether the sidecar that serves this workspace's API is running, since what the tab can
+      // honestly promise depends on it.
+      apiUp:     false,
     };
   },
 
@@ -87,6 +92,11 @@ export default {
       return this.ownOrigin ? workspaceOriginUrl(this.service) : this.proxyUrl;
     },
 
+    /** The sidecar this workspace's dashboard talks to, if its template has one. */
+    apiSidecar() {
+      return (this.template?.sidecars || []).find((sidecar) => sidecar.providesApi);
+    },
+
     /** Why there is nothing to show, or '' when there is. */
     blocked() {
       if (!this.service) {
@@ -111,6 +121,12 @@ export default {
     blocked() {
       this.check();
     },
+
+    // At its own origin the answer is the workspace's own state, so a change in it is the event
+    // that matters rather than the next poll.
+    'workspace.state'() {
+      this.check();
+    },
   },
 
   mounted() {
@@ -132,16 +148,30 @@ export default {
         return;
       }
 
-      // Always through the proxy, in both modes. A workspace on its own origin is on http, and
-      // an https page cannot fetch it to ask whether it is up; the proxy answers the same
-      // question about the same pod, and a 503 from it is the thing worth waiting through.
-      const serving = await workspaceServing(this.workspace.name, this.port, this.scheme);
+      // A workspace at its own origin is asked about differently, because it cannot be asked
+      // directly: it is on another origin with a certificate this page has never accepted, so a
+      // fetch of it fails whatever is actually running. What the cluster knows is enough. Its
+      // readiness probe is a TCP check on the very port in question, so a ready pod is a pod
+      // with something listening on it.
+      const serving = this.ownOrigin
+        ? this.workspace.state === 'running'
+        : await workspaceServing(this.workspace.name, this.port, this.scheme);
 
       if (this.unmounted) {
         return;
       }
 
       this.status = serving ? 'serving' : 'waiting';
+
+      // What the tab can promise depends on whether the workspace's own Rancher is up, so it is
+      // asked here rather than assumed. A card that says "it is the workspace's dashboard, not
+      // this cluster" while nothing is serving that dashboard an API is a sentence that is only
+      // true half the time.
+      if (this.apiSidecar) {
+        const states = await listSidecars(this.workspace.name, [this.apiSidecar], this.template).catch(() => ({}));
+
+        this.apiUp = states[this.apiSidecar.id]?.state === 'running';
+      }
 
       // Keep looking while it is not serving. Once it is, the iframe is the thing watching it,
       // and polling behind it would be a request every three seconds saying what the person
@@ -216,16 +246,27 @@ export default {
       v-else-if="ownOrigin"
       class="workspace-browser__away"
     >
-      <Banner color="info">
+      <Banner :color="apiUp ? 'info' : 'warning'">
         <p>
           This workspace is served at an origin of its own, so Open takes you to it in a new tab
           rather than framing it here. That is what makes its dashboard talk to the workspace's
           own Rancher: behind Rancher's own origin its API calls would go to the Rancher you are
           logged in to instead, whatever the workspace is pointed at.
         </p>
+        <p v-if="apiUp">
+          It is pointed at this workspace's own Rancher, which is running, so what you do in there
+          happens in that Rancher and not in this cluster.
+        </p>
+        <p v-else-if="apiSidecar">
+          Its own Rancher is not running, so the dashboard will load and then fail every request
+          it makes. Start <b>{{ apiSidecar.label }}</b> on the Sidecars tab first. It is pointed at
+          that Rancher either way and never at this one, so nothing you do in there can reach this
+          cluster.
+        </p>
         <p>
-          The address is a node port, which means it is open to anyone who can reach this node and
-          has no Rancher session in front of it. It is the workspace's dashboard, not this cluster.
+          The address is a node port, open to anyone who can reach this node, with no Rancher
+          session in front of it. It serves its own development certificate, so the browser asks
+          about that once.
         </p>
       </Banner>
       <RcButton
