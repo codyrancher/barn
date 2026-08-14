@@ -43,6 +43,27 @@ export const SIDECAR_HOST_PATH = '/var/lib/rancher/dev-sidecars';
  *
  * `replicateServices.toHost` is what makes the rest possible. The rancher Service inside the
  * vcluster is copied out into this namespace as `rancher-vc`, and that is what the relay dials.
+ *
+ * `replicateServices.fromHost` is the obvious way to give Rancher an address for the auth sidecars,
+ * and it is not used here. It was tried and it cannot work with this manager. The keycloak and
+ * openldap sidecars are ordinary Deployments in this namespace, so a pod inside the vcluster cannot
+ * resolve them: the vcluster's CoreDNS is authoritative for `*.svc.cluster.local` and has never
+ * heard of them. But adding a `fromHost` entry makes the chart render a **ClusterRole** and a
+ * ClusterRoleBinding (services and endpoints, get/watch/list, cluster-wide), because the chart
+ * cannot know that the source namespace is the vcluster's own. Measured with `helm template`: no
+ * ClusterRole without the entry, two with it. The manager's Role is deliberately namespaced, so the
+ * upgrade fails at the point helm reads that object:
+ *
+ *   Error: UPGRADE FAILED: could not get information about the resource ClusterRole
+ *   "vc-vc-v-dev-demo": clusterroles.rbac.authorization.k8s.io is forbidden
+ *
+ * Widening the manager to create ClusterRoles is not a smaller problem than the one being solved:
+ * a namespaced account that can write cluster-scoped RBAC is a cluster-admin account with extra
+ * steps. So the address Rancher is given is the host Service's ClusterIP instead, which needs no
+ * DNS and no rights at all: a vcluster's pods are ordinary pods on this node, so kube-proxy routes
+ * them to a host ClusterIP like anything else. Proven from the rancher pod inside the vcluster:
+ * a connection to the openldap Service's ClusterIP on 389 is accepted (curl exit 52, an answer that
+ * is not HTTP) while an unused port on the same address times out (exit 28). See AUTH_SCRIPT.
  */
 export const VCLUSTER_VALUES = `controlPlane:
   distro:
@@ -87,7 +108,9 @@ networking:
  */
 export const MANAGE_SCRIPT = `#!/bin/sh
 set -x
-apk add --no-cache socat curl || true
+# openldap-clients is for auth.sh: seeding a directory needs an LDAP client, and this pod is the
+# only one that can reach OpenLDAP and hold the admin password at the same time.
+apk add --no-cache socat curl openldap-clients || true
 
 # Nothing is installed without a password to install it with.
 #
@@ -277,7 +300,299 @@ else
   echo "bootstrap skipped: could not log in as admin"
 fi
 
+# The auth provider the workspace asked for, applied and then kept applied. Separate script and a
+# loop of its own, because it answers to a ConfigMap somebody edits while this pod runs, where
+# everything above happens once and is finished.
+sh /scripts/auth.sh &
+
 wait
+`;
+
+/**
+ * The reconciler behind the Sidecars tab's auth row.
+ *
+ * The shape is the closet's, moved from its api container to here: one provider at a time, applying
+ * one disables the others, and the switch is a stored choice rather than a call, so a Rancher that
+ * is reinstalled comes back with the same provider. What has changed is where the choice lives. The
+ * closet keeps it in `.env` beside a docker socket; there is no such place here, so it is a
+ * ConfigMap in the workspace's namespace, which the tab can write and this can read.
+ *
+ * It runs in the manager and not in the browser, and that is not a preference. Every call below
+ * needs an admin token for a Rancher that answers only inside this namespace. The browser reaches
+ * that Rancher through the apiserver's service proxy, and its Authorization header belongs to the
+ * Rancher this product is served from: there is no second one to send. The manager already holds
+ * the password by secretKeyRef, already reaches Keycloak's admin API and OpenLDAP's port, and is
+ * already where the first bootstrap happens.
+ *
+ * Status goes back into the same ConfigMap, so the card can say what happened without holding a
+ * token either.
+ */
+export const AUTH_SCRIPT = `#!/bin/sh
+# Tracing off for all of it: every call carries a password or a token.
+CM=dev-auth
+RURL="https://rancher-vc.$NS.svc"
+
+# Two addresses for each provider, and they are not interchangeable.
+#
+#   *_SEED is how this pod reaches it: an ordinary Service name in this namespace, used to create a
+#   realm or a directory entry.
+#   what Rancher is given is different, because Rancher runs inside the vcluster and its DNS is not
+#   this cluster's. For LDAP that is the host Service's ClusterIP, looked up below (see
+#   VCLUSTER_VALUES for why it is not a replicated Service). For OIDC it is the node's address,
+#   because the browser is part of that exchange and the node is the only address both can use.
+KC_SEED="http://$NS-keycloak.$NS.svc:8080"
+LDAP_SEED="$NS-openldap.$NS.svc"
+LDAP_BASE="dc=dev,dc=local"
+LDAP_ADMIN="cn=admin,dc=dev,dc=local"
+
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Status back to the object the request came from, so the card reads the outcome from the same
+# place it wrote the request. Message stays plain text: it goes through a JSON merge patch.
+say() {
+  kubectl -n "$NS" patch cm "$CM" --type merge \\
+    -p "{\\"data\\":{\\"applied\\":\\"$1\\",\\"message\\":\\"$2\\",\\"at\\":\\"$(now)\\"}}" >/dev/null 2>&1
+  echo "auth: [$1] $2"
+}
+
+admin_token() {
+  curl -sk --max-time 20 -o /tmp/auth-login.json \\
+    -X POST "$RURL/v3-public/localProviders/local?action=login" \\
+    -H 'content-type: application/json' \\
+    -d "{\\"username\\":\\"admin\\",\\"password\\":\\"$CATTLE_BOOTSTRAP_PASSWORD\\"}" >/dev/null 2>&1
+  tr ',' '\\n' < /tmp/auth-login.json | sed -n 's/.*"token":"\\([^"]*\\)".*/\\1/p' | head -1
+}
+
+# Rancher enables one provider at a time, so applying one is also disabling the other. Reading
+# first, because disable on an already-disabled provider is an error rather than a no-op.
+disable_provider() {
+  if curl -sk --max-time 20 -H "Authorization: Bearer $TOKEN" "$RURL/v3/$1/$2" | grep -q '"enabled":true'; then
+    curl -sk --max-time 20 -o /dev/null -X POST -H "Authorization: Bearer $TOKEN" "$RURL/v3/$1/$2?action=disable"
+    echo "auth: disabled $2"
+  fi
+}
+
+# ---- openldap ----
+#
+# The directory is empty when it starts, so there is nobody to sign in as until this runs. The
+# closet's api does exactly this with the same ldap tools. -c so that an entry that is already
+# there does not stop the next one, and ldappasswd afterwards so the entry always carries the
+# password that is in the store rather than the one it was created with.
+seed_ldap() {
+  cat > /tmp/seed.ldif <<LDIF
+dn: ou=users,$LDAP_BASE
+objectClass: organizationalUnit
+ou: users
+
+dn: uid=user1,ou=users,$LDAP_BASE
+objectClass: inetOrgPerson
+cn: user1
+sn: One
+uid: user1
+userPassword: $AUTH_USER_PASSWORD
+LDIF
+  chmod 600 /tmp/seed.ldif
+  ldapadd -c -x -H "ldap://$LDAP_SEED:389" -D "$LDAP_ADMIN" -w "$OPENLDAP_ADMIN_PASSWORD" \\
+    -f /tmp/seed.ldif >/dev/null 2>&1
+  rm -f /tmp/seed.ldif
+  ldappasswd -x -H "ldap://$LDAP_SEED:389" -D "$LDAP_ADMIN" -w "$OPENLDAP_ADMIN_PASSWORD" \\
+    -s "$AUTH_USER_PASSWORD" "uid=user1,ou=users,$LDAP_BASE" >/dev/null 2>&1
+  # What decides is whether the entry is there, not what ldapadd returned: the usual outcome is a
+  # non-zero exit because one of the two entries already existed.
+  ldapsearch -x -H "ldap://$LDAP_SEED:389" -D "$LDAP_ADMIN" -w "$OPENLDAP_ADMIN_PASSWORD" \\
+    -b "ou=users,$LDAP_BASE" "(uid=user1)" 2>/dev/null | grep -q '^uid: user1'
+}
+
+apply_openldap() {
+  if [ -z "$OPENLDAP_ADMIN_PASSWORD" ] || [ -z "$AUTH_USER_PASSWORD" ]; then
+    say "" "openldap: its passwords are not in the secret store"
+    return 1
+  fi
+
+  if ! seed_ldap; then
+    say "" "openldap: could not create uid=user1 in the directory"
+    return 1
+  fi
+
+  # The address Rancher gets. Read now rather than held anywhere, because a Service that is deleted
+  # and recreated has a different one and this is the moment it matters.
+  LDAP_FOR_RANCHER=$(kubectl -n "$NS" get svc "$NS-openldap" -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
+
+  if [ -z "$LDAP_FOR_RANCHER" ]; then
+    say "" "openldap: it has no Service, so Rancher has no address for it"
+    return 1
+  fi
+
+  cat > /tmp/ldap.json <<JSON
+{"type":"openLdapConfig","id":"openldap","enabled":true,"accessMode":"unrestricted",
+"servers":["$LDAP_FOR_RANCHER"],"port":389,"tls":false,"starttls":false,
+"serviceAccountDistinguishedName":"$LDAP_ADMIN","serviceAccountPassword":"$OPENLDAP_ADMIN_PASSWORD",
+"userSearchBase":"ou=users,$LDAP_BASE","userObjectClass":"inetOrgPerson","userLoginAttribute":"uid",
+"userNameAttribute":"cn","userMemberAttribute":"memberOf","userSearchAttribute":"uid|sn|givenName",
+"groupSearchBase":"ou=users,$LDAP_BASE","groupObjectClass":"groupOfNames","groupNameAttribute":"cn",
+"groupMemberMappingAttribute":"member","groupMemberUserAttribute":"entryDN","groupDNAttribute":"entryDN",
+"groupSearchAttribute":"cn","disabledStatusBitmask":0,"nestedGroupMembershipEnabled":false,
+"connectionTimeout":5000}
+JSON
+  chmod 600 /tmp/ldap.json
+  CODE=$(curl -sk --max-time 60 -o /tmp/ldap-put.json -w '%{http_code}' \\
+    -X PUT "$RURL/v3/openLdapConfigs/openldap" \\
+    -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' -d @/tmp/ldap.json)
+  rm -f /tmp/ldap.json
+
+  case "$CODE" in
+    2*) ;;
+    *) say "" "openldap: this Rancher would not take the config (HTTP $CODE)"; return 1 ;;
+  esac
+
+  # The PUT succeeding only means Rancher stored it. A login as user1 is the thing that proves
+  # Rancher can bind, search and authenticate, which is what the person pressing Apply is asking.
+  curl -sk --max-time 30 -o /tmp/ldap-user.json \\
+    -X POST "$RURL/v3-public/openLdapProviders/openldap?action=login" \\
+    -H 'content-type: application/json' \\
+    -d "{\\"username\\":\\"user1\\",\\"password\\":\\"$AUTH_USER_PASSWORD\\",\\"responseType\\":\\"token\\"}" >/dev/null 2>&1
+
+  if ! grep -q '"token"' /tmp/ldap-user.json; then
+    say "" "openldap: enabled, but signing in as user1 did not work"
+    return 1
+  fi
+
+  say "openldap" "Rancher is using OpenLDAP. Sign in as user1."
+}
+
+# ---- keycloak (OIDC) ----
+#
+# The browser takes part in this one, so the issuer has to be an address the browser can reach and
+# the same address Rancher fetches the discovery document from. Inside a vcluster there is exactly
+# one such address, the node's, which is why the keycloak sidecar declares a node port.
+apply_keycloak() {
+  if [ -z "$KEYCLOAK_ADMIN_PASSWORD" ] || [ -z "$KEYCLOAK_CLIENT_SECRET" ] || [ -z "$AUTH_USER_PASSWORD" ]; then
+    say "" "keycloak: its secrets are not in the secret store"
+    return 1
+  fi
+
+  KCPORT=$(kubectl -n "$NS" get svc "$NS-keycloak" -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null)
+  WSPORT=$(kubectl -n "$NS" get svc "$NS" -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null)
+
+  if [ -z "$KCPORT" ] || [ -z "$NODE_IP" ]; then
+    say "" "keycloak: it has no node port, so no address a browser and Rancher can share"
+    return 1
+  fi
+
+  if [ -z "$WSPORT" ]; then
+    say "" "keycloak: this workspace has no node port to be sent back to after signing in"
+    return 1
+  fi
+
+  ISSUER="http://$NODE_IP:$KCPORT/realms/rancher"
+  RETURN_URL="https://$NODE_IP:$WSPORT/verify-auth"
+
+  KT=$(curl -s --max-time 20 "$KC_SEED/realms/master/protocol/openid-connect/token" \\
+    -d client_id=admin-cli -d username=admin -d grant_type=password \\
+    --data-urlencode "password=$KEYCLOAK_ADMIN_PASSWORD" \\
+    | tr ',' '\\n' | sed -n 's/.*"access_token":"\\([^"]*\\)".*/\\1/p' | head -1)
+
+  if [ -z "$KT" ]; then
+    say "" "keycloak: could not log in to its admin API as admin"
+    return 1
+  fi
+
+  # Realm, client and user, each create-if-missing and then updated, so a second Apply repairs a
+  # realm somebody has edited rather than failing on the 409.
+  curl -s -o /dev/null -X POST "$KC_SEED/admin/realms" -H "Authorization: Bearer $KT" \\
+    -H 'content-type: application/json' \\
+    -d '{"realm":"rancher","enabled":true,"sslRequired":"none"}'
+
+  printf '{"clientId":"rancher","enabled":true,"protocol":"openid-connect","publicClient":false,"standardFlowEnabled":true,"directAccessGrantsEnabled":true,"secret":"%s","redirectUris":["%s","*"],"webOrigins":["*"]}' \\
+    "$KEYCLOAK_CLIENT_SECRET" "$RETURN_URL" > /tmp/kc-client.json
+  chmod 600 /tmp/kc-client.json
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$KC_SEED/admin/realms/rancher/clients" \\
+    -H "Authorization: Bearer $KT" -H 'content-type: application/json' -d @/tmp/kc-client.json)
+
+  if [ "$CODE" = "409" ]; then
+    CID=$(curl -s -H "Authorization: Bearer $KT" "$KC_SEED/admin/realms/rancher/clients?clientId=rancher" \\
+      | tr ',' '\\n' | sed -n 's/.*"id":"\\([^"]*\\)".*/\\1/p' | head -1)
+    curl -s -o /dev/null -X PUT "$KC_SEED/admin/realms/rancher/clients/$CID" \\
+      -H "Authorization: Bearer $KT" -H 'content-type: application/json' -d @/tmp/kc-client.json
+  fi
+  rm -f /tmp/kc-client.json
+
+  printf '{"username":"user1","enabled":true,"email":"user1@dev.local","emailVerified":true,"firstName":"User","lastName":"One","credentials":[{"type":"password","value":"%s","temporary":false}]}' \\
+    "$AUTH_USER_PASSWORD" > /tmp/kc-user.json
+  chmod 600 /tmp/kc-user.json
+  CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$KC_SEED/admin/realms/rancher/users" \\
+    -H "Authorization: Bearer $KT" -H 'content-type: application/json' -d @/tmp/kc-user.json)
+
+  if [ "$CODE" = "409" ]; then
+    UID1=$(curl -s -H "Authorization: Bearer $KT" "$KC_SEED/admin/realms/rancher/users?username=user1" \\
+      | tr ',' '\\n' | sed -n 's/.*"id":"\\([^"]*\\)".*/\\1/p' | head -1)
+    printf '{"type":"password","value":"%s","temporary":false}' "$AUTH_USER_PASSWORD" > /tmp/kc-pw.json
+    chmod 600 /tmp/kc-pw.json
+    curl -s -o /dev/null -X PUT "$KC_SEED/admin/realms/rancher/users/$UID1/reset-password" \\
+      -H "Authorization: Bearer $KT" -H 'content-type: application/json' -d @/tmp/kc-pw.json
+    rm -f /tmp/kc-pw.json
+  fi
+  rm -f /tmp/kc-user.json
+
+  # Rancher validates this one itself: it fetches the discovery document from the issuer as it
+  # stores the config, so a non-2xx here is Rancher saying it could not reach Keycloak.
+  printf '{"type":"keyCloakOIDCConfig","id":"keycloakoidc","enabled":true,"accessMode":"unrestricted","clientId":"rancher","clientSecret":"%s","issuer":"%s","authEndpoint":"%s/protocol/openid-connect/auth","rancherUrl":"%s","scope":"openid profile email"}' \\
+    "$KEYCLOAK_CLIENT_SECRET" "$ISSUER" "$ISSUER" "$RETURN_URL" > /tmp/kc-oidc.json
+  chmod 600 /tmp/kc-oidc.json
+  CODE=$(curl -sk --max-time 60 -o /tmp/kc-oidc-put.json -w '%{http_code}' \\
+    -X PUT "$RURL/v3/keyCloakOIDCConfigs/keycloakoidc" \\
+    -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' -d @/tmp/kc-oidc.json)
+  rm -f /tmp/kc-oidc.json
+
+  case "$CODE" in
+    2*) say "keycloak-oidc" "Rancher is using Keycloak OIDC at $ISSUER. Sign in as user1." ;;
+    *) say "" "keycloak: this Rancher would not take the OIDC config (HTTP $CODE)"; return 1 ;;
+  esac
+}
+
+# The ConfigMap is created here rather than only by the tab, so that a workspace whose auth has
+# never been touched still has somewhere for this to report to.
+kubectl -n "$NS" get cm "$CM" >/dev/null 2>&1 || \\
+  kubectl -n "$NS" create cm "$CM" --from-literal=provider= >/dev/null 2>&1
+
+# A sentinel that no provider can equal, so the first pass always applies whatever is asked for,
+# including nothing. A failed apply leaves it alone, which is what makes this retry.
+LAST=__unread__
+
+while true; do
+  WANT=$(kubectl -n "$NS" get cm "$CM" -o jsonpath='{.data.provider}' 2>/dev/null)
+
+  if [ "$WANT" != "$LAST" ]; then
+    TOKEN=$(admin_token)
+
+    if [ -z "$TOKEN" ]; then
+      say "" "cannot sign in to this workspace's Rancher as admin"
+    else
+      case "$WANT" in
+        openldap)
+          disable_provider keyCloakOIDCConfigs keycloakoidc
+          apply_openldap && LAST="$WANT"
+          ;;
+        keycloak-oidc)
+          disable_provider openLdapConfigs openldap
+          apply_keycloak && LAST="$WANT"
+          ;;
+        '')
+          disable_provider keyCloakOIDCConfigs keycloakoidc
+          disable_provider openLdapConfigs openldap
+          say "" "local users only"
+          LAST="$WANT"
+          ;;
+        *)
+          say "" "no idea what provider [$WANT] is"
+          LAST="$WANT"
+          ;;
+      esac
+    fi
+  fi
+
+  sleep 20
+done
 `;
 
 /**

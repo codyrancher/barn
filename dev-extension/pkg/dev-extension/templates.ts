@@ -20,7 +20,7 @@
  * points at that.
  */
 import {
-  VCLUSTER_VALUES, MANAGE_SCRIPT, PAUSE_SCRIPT, VCLUSTER_VERSION, SIDECAR_HOST_PATH
+  VCLUSTER_VALUES, MANAGE_SCRIPT, AUTH_SCRIPT, PAUSE_SCRIPT, VCLUSTER_VERSION, SIDECAR_HOST_PATH
 } from './rancher-sidecar';
 
 /**
@@ -50,6 +50,23 @@ export interface DevSecret {
    * asking for it, because a generated password you cannot read is one you cannot log in with.
    */
   generated?: boolean;
+}
+
+/**
+ * One Rancher auth provider a sidecar can back.
+ *
+ * The closet says the same thing in `sidecar.yml` as `rancherAuth.modes`, and for the same reason:
+ * one container can back more than one provider (keycloak is both OIDC and SAML there), so the
+ * choice belongs to the card rather than to the sidecar. Rancher enables exactly one provider at a
+ * time, so applying one disables the others.
+ *
+ * Only what the card needs is declared. How a provider is configured is the manager's, because the
+ * manager is the only thing holding an admin token for the workspace's Rancher: see AUTH_SCRIPT.
+ */
+export interface DevAuthMode {
+  /** What is written into the workspace's dev-auth ConfigMap, and what the manager matches on. */
+  value: string;
+  label: string;
 }
 
 /**
@@ -128,6 +145,29 @@ export interface DevSidecar {
    * works either way. This is how a declaration says that without a second copy of the value.
    */
   secretEnv?: Record<string, string>;
+  /**
+   * Environment read off the pod itself rather than out of the declaration.
+   *
+   * The one thing this is for is the node's address, which nothing in this code knows and which the
+   * OIDC issuer has to be: `status.hostIP` is the kubelet telling the pod where it is running.
+   */
+  fieldEnv?: Record<string, string>;
+  /**
+   * Publish this sidecar's Service on a node port as well as inside the cluster.
+   *
+   * The same trade the workspace's own origin makes, and it is offered for the same reason rather
+   * than for convenience: an OIDC provider has to be at one address that both the browser and the
+   * Rancher being configured can reach, and inside a vcluster there is no such address except the
+   * node's. The cost is that the port is open to whoever can reach the node.
+   */
+  nodePort?: boolean;
+  /** The Rancher auth providers this sidecar can back, in the order the card offers them. */
+  auth?: DevAuthMode[];
+  /**
+   * This sidecar speaks MCP at this path, so what its card offers is the line that adds it to a
+   * conversation rather than a link. The closet's card does the same thing for the same sidecar.
+   */
+  mcpPath?: string;
 }
 
 export interface DevTemplate {
@@ -275,6 +315,24 @@ export const TEMPLATES: DevTemplate[] = [
         required:  true,
         generated: true,
       },
+      // The two values the auth switch needs and nobody has an opinion about, generated the same
+      // way as the passwords above. The client secret is shared between Keycloak's own client and
+      // Rancher's OIDC config, and the user password is what user1 logs in with in either provider,
+      // which is the closet's arrangement: the same logins work across every provider.
+      {
+        key:       'KEYCLOAK_CLIENT_SECRET',
+        label:     'Keycloak client secret',
+        help:      'The secret of the `rancher` OIDC client in Keycloak. Generated, and the same value is written into Keycloak and into this workspace\'s Rancher.',
+        required:  true,
+        generated: true,
+      },
+      {
+        key:       'AUTH_USER_PASSWORD',
+        label:     'Auth test user password',
+        help:      'The password of user1, the user created in Keycloak and in OpenLDAP so there is somebody to sign in as. Generated, and shown here because it is what you type.',
+        required:  true,
+        generated: true,
+      },
     ],
     // Every image here was started in this cluster and reached Ready before it was given a
     // card. What is deliberately absent is a Rancher server: it cannot reach Running here (see
@@ -299,10 +357,14 @@ export const TEMPLATES: DevTemplate[] = [
         scripts:     {
           'vcluster-values.yaml': VCLUSTER_VALUES.replace('{{dataPath}}', `${ SIDECAR_HOST_PATH }/{{namespace}}/vcluster-data`),
           'manage.sh':            MANAGE_SCRIPT,
+          'auth.sh':              AUTH_SCRIPT,
           'pause.sh':             PAUSE_SCRIPT,
         },
         preStop: ['/bin/sh', '/scripts/pause.sh'],
-        env:     {
+        // The node's own address, which is the only address both a browser and a pod inside the
+        // vcluster can reach. See nodePort on the keycloak sidecar.
+        fieldEnv: { NODE_IP: 'status.hostIP' },
+        env:      {
           NS:               '{{namespace}}',
           VCLUSTER_VERSION,
           // The name the certificate is issued for. It is not how anything reaches this Rancher
@@ -311,7 +373,13 @@ export const TEMPLATES: DevTemplate[] = [
           // change under a session.
           RANCHER_HOSTNAME: 'rancher.{{workspace}}.local',
         },
-        secrets: ['RANCHER_BOOTSTRAP_PASSWORD'],
+        // Everything the auth switch needs, by reference, because the manager is where it is used:
+        // it is the only thing in the product holding an admin token for this Rancher, and the only
+        // place that can reach Keycloak's admin API and OpenLDAP's port at once. See AUTH_SCRIPT.
+        secrets: [
+          'RANCHER_BOOTSTRAP_PASSWORD', 'KEYCLOAK_ADMIN_PASSWORD', 'KEYCLOAK_CLIENT_SECRET',
+          'OPENLDAP_ADMIN_PASSWORD', 'AUTH_USER_PASSWORD',
+        ],
         // The chart's own name for it, which is also what the rancher chart's value is called.
         secretEnv: { CATTLE_BOOTSTRAP_PASSWORD: 'RANCHER_BOOTSTRAP_PASSWORD' },
       },
@@ -323,6 +391,12 @@ export const TEMPLATES: DevTemplate[] = [
         image:       'quay.io/keycloak/keycloak:26.0',
         args:        ['start-dev'],
         port:        8080,
+        // OIDC is the one thing here that the browser takes part in: it is sent to the issuer and
+        // sent back. So the issuer has to be an address a browser can reach, and it has to be the
+        // same address the workspace's Rancher fetches the discovery document from, from inside a
+        // vcluster. A cluster-internal name is only the second; a node port is both.
+        nodePort:    true,
+        auth:        [{ value: 'keycloak-oidc', label: 'OIDC' }],
         env:         {
           KEYCLOAK_ADMIN: 'admin', KC_BOOTSTRAP_ADMIN_USERNAME: 'admin', KC_HTTP_PORT: '8080'
         },
@@ -338,6 +412,13 @@ export const TEMPLATES: DevTemplate[] = [
         description: 'LDAP directory server, for testing the dashboard against a directory rather than local users.',
         image:       'osixia/openldap:1.5.0',
         port:        389,
+        // No node port and none needed: Rancher binds to LDAP itself, server to server, and the
+        // browser only ever posts a username and a password to Rancher. That is why this is the
+        // provider the product can prove end to end here and OIDC is the one with a caveat.
+        auth:        [{ value: 'openldap', label: 'LDAP' }],
+        // Nothing to open. The service proxy speaks HTTP and this port speaks LDAP, so a Launch
+        // button here would open a page that could only ever be an error.
+        launchable:  false,
         env:         {
           LDAP_ORGANISATION: 'dev', LDAP_DOMAIN: 'dev.local', LDAP_TLS: 'false'
         },
@@ -350,7 +431,15 @@ export const TEMPLATES: DevTemplate[] = [
         label:       'Figma',
         description: 'Figma MCP server, so a conversation in this workspace can read the design a change is meant to match.',
         image:       'acuvity/mcp-server-figma:latest',
-        port:        3000,
+        // 8000, which is what the image listens on and what the closet's compose file publishes.
+        // It was declared as 3000, so the Service pointed at a port nothing was bound to: the
+        // container's own log says `minibridge frontend configured ... listen=:8000`, and 8080 is
+        // its metrics endpoint rather than the MCP one.
+        port:        8000,
+        // Headless: it speaks MCP, not HTML, so there is nothing to open in a tab. The closet says
+        // the same thing with `launch: false` and shows the address instead.
+        launchable:  false,
+        mcpPath:     '/mcp',
         secrets:     ['FIGMA_API_KEY'],
       },
     ],

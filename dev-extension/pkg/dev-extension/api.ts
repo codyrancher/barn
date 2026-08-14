@@ -1893,17 +1893,18 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
   const existing = await devFetch(url).catch(() => null);
 
   if (existing) {
+    // The declaration as it stands today, not as it stood when this Deployment was made. A sidecar
+    // created before its declaration asked for a variable never gains it otherwise, which is not
+    // academic: the auth switch added five secrets and the node's address to a manager that already
+    // existed, and a manager without them starts, says nothing, and cannot configure anything.
     existing.spec.replicas = 1;
+    existing.spec.template.spec = sidecarPodSpec(workspace, sidecar);
     await devFetch(url, { method: 'PUT', body: JSON.stringify(existing) });
 
     return;
   }
 
-  const wanted = sidecar.secrets || [];
   const labels = { app: name, [LABEL_WORKSPACE]: workspace, [LABEL_SIDECAR]: sidecar.id };
-  const substitute = (value: string) => value
-    .replace(/{{namespace}}/g, namespace)
-    .replace(/{{workspace}}/g, workspace);
 
   await devFetch(`${ BASE }/v1/apps.deployments`, {
     method: 'POST',
@@ -1919,73 +1920,212 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
         // rolling update there are two of them: the card would read the older pod's state and
         // report Running while the new one cannot start at all.
         strategy: { type: 'Recreate' },
-        template: {
-          metadata: { labels },
-          spec:     {
-            // A manager runs as an account of its own. See ensureManagerRbac.
-            serviceAccountName: sidecar.manager ? MANAGER_SERVICE_ACCOUNT : WORKSPACE_SERVICE_ACCOUNT,
-            containers:         [{
-              name:  'sidecar',
-              image: sidecar.image,
-              ...(sidecar.command ? { command: sidecar.command } : {}),
-              ...(sidecar.args ? { args: sidecar.args } : {}),
-              ...(sidecar.port ? { ports: [{ name: 'http', containerPort: sidecar.port }] } : {}),
-              env: [
-                ...Object.entries(sidecar.env || {}).map(([envName, value]) => ({
-                  name: envName, value: substitute(value)
-                })),
-                // By reference, never by value: the token is not in the pod spec, so it is not
-                // in `kubectl get deploy -o yaml` either.
-                ...wanted.map((key) => ({
-                  name:      key,
-                  valueFrom: { secretKeyRef: { name: MIRROR_SECRET, key, optional: true } },
-                })),
-                // The same values under whatever name the image actually reads. See secretEnv.
-                ...Object.entries(sidecar.secretEnv || {}).map(([envName, key]) => ({
-                  name:      envName,
-                  valueFrom: { secretKeyRef: { name: MIRROR_SECRET, key, optional: true } },
-                })),
-              ],
-              // The chart's own budget: half an hour of ten-second-apart attempts, starting a
-              // minute in. What it is waiting for is two helm installs into a cluster this pod has
-              // to create first, and a probe that gave up sooner would kill the thing it is
-              // measuring part-way through.
-              ...(sidecar.readyPort ? {
-                readinessProbe: {
-                  tcpSocket:           { port: sidecar.readyPort },
-                  initialDelaySeconds: 60,
-                  periodSeconds:       20,
-                  failureThreshold:    90,
-                },
-              } : {}),
-              ...(sidecar.preStop ? { lifecycle: { preStop: { exec: { command: sidecar.preStop } } } } : {}),
-              ...(sidecar.scripts ? { volumeMounts: [{ name: 'scripts', mountPath: '/scripts', readOnly: true }] } : {}),
-            }],
-            ...(sidecar.scripts ? {
-              volumes: [{ name: 'scripts', configMap: { name: `${ name }-scripts`, defaultMode: 0o555 } }],
-            } : {}),
-          },
-        },
+        template: { metadata: { labels }, spec: sidecarPodSpec(workspace, sidecar) },
       },
     }),
   });
 
-  if (sidecar.port) {
-    const serviceUrl = `${ BASE }/v1/services/${ namespace }/${ name }`;
-    const service = await devFetch(serviceUrl).catch(() => null);
+  await ensureSidecarService(workspace, sidecar);
+}
 
-    if (!service) {
-      await devFetch(`${ BASE }/v1/services`, {
-        method: 'POST',
-        body:   JSON.stringify({
-          apiVersion: 'v1',
-          kind:       'Service',
-          metadata:   { namespace, name, labels },
-          spec:       { selector: { app: name }, ports: [{ name: sidecar.scheme || 'http', port: sidecar.port, targetPort: 'http' }] },
-        }),
-      });
-    }
+/**
+ * The pod a sidecar's declaration describes.
+ *
+ * One function rather than an object literal inside the create path, because the update path needs
+ * the same answer: what a sidecar's pod should be is a property of the declaration, and a
+ * Deployment that already exists is just as entitled to today's version of it as a new one.
+ */
+function sidecarPodSpec(workspace: string, sidecar: DevSidecar): Json {
+  const namespace = workspaceNamespace(workspace);
+  const name = sidecarName(workspace, sidecar.id);
+  const substitute = (value: string) => value
+    .replace(/{{namespace}}/g, namespace)
+    .replace(/{{workspace}}/g, workspace);
+
+  return {
+    // A manager runs as an account of its own. See ensureManagerRbac.
+    serviceAccountName: sidecar.manager ? MANAGER_SERVICE_ACCOUNT : WORKSPACE_SERVICE_ACCOUNT,
+    containers:         [{
+      name:  'sidecar',
+      image: sidecar.image,
+      ...(sidecar.command ? { command: sidecar.command } : {}),
+      ...(sidecar.args ? { args: sidecar.args } : {}),
+      ...(sidecar.port ? { ports: [{ name: 'http', containerPort: sidecar.port }] } : {}),
+      env: [
+        ...Object.entries(sidecar.env || {}).map(([envName, value]) => ({
+          name: envName, value: substitute(value)
+        })),
+        // By reference, never by value: the token is not in the pod spec, so it is not
+        // in `kubectl get deploy -o yaml` either.
+        ...(sidecar.secrets || []).map((key) => ({
+          name:      key,
+          valueFrom: { secretKeyRef: { name: MIRROR_SECRET, key, optional: true } },
+        })),
+        // The same values under whatever name the image actually reads. See secretEnv.
+        ...Object.entries(sidecar.secretEnv || {}).map(([envName, key]) => ({
+          name:      envName,
+          valueFrom: { secretKeyRef: { name: MIRROR_SECRET, key, optional: true } },
+        })),
+        // Read off the pod rather than out of the declaration, because nothing on this
+        // side of the API knows it. See fieldEnv.
+        ...Object.entries(sidecar.fieldEnv || {}).map(([envName, fieldPath]) => ({
+          name:      envName,
+          valueFrom: { fieldRef: { fieldPath } },
+        })),
+      ],
+      // The chart's own budget: half an hour of ten-second-apart attempts, starting a
+      // minute in. What it is waiting for is two helm installs into a cluster this pod has
+      // to create first, and a probe that gave up sooner would kill the thing it is
+      // measuring part-way through.
+      ...(sidecar.readyPort ? {
+        readinessProbe: {
+          tcpSocket:           { port: sidecar.readyPort },
+          initialDelaySeconds: 60,
+          periodSeconds:       20,
+          failureThreshold:    90,
+        },
+      } : {}),
+      ...(sidecar.preStop ? { lifecycle: { preStop: { exec: { command: sidecar.preStop } } } } : {}),
+      ...(sidecar.scripts ? { volumeMounts: [{ name: 'scripts', mountPath: '/scripts', readOnly: true }] } : {}),
+    }],
+    ...(sidecar.scripts ? {
+      volumes: [{ name: 'scripts', configMap: { name: `${ name }-scripts`, defaultMode: 0o555 } }],
+    } : {}),
+  };
+}
+
+/**
+ * A sidecar's Service, of the type its declaration asks for.
+ *
+ * Written on every start rather than only on the first, and upgraded in place, for the same reason
+ * the workspace's own Service is: a sidecar started before its declaration wanted a node port
+ * already has a ClusterIP Service, and nothing else would ever put that right.
+ */
+async function ensureSidecarService(workspace: string, sidecar: DevSidecar): Promise<void> {
+  if (!sidecar.port) {
+    return;
   }
+
+  const namespace = workspaceNamespace(workspace);
+  const name = sidecarName(workspace, sidecar.id);
+  const labels = { app: name, [LABEL_WORKSPACE]: workspace, [LABEL_SIDECAR]: sidecar.id };
+  const url = `${ BASE }/v1/services/${ namespace }/${ name }`;
+  const service = await devFetch(url).catch(() => null);
+
+  if (!service) {
+    await devFetch(`${ BASE }/v1/services`, {
+      method: 'POST',
+      body:   JSON.stringify({
+        apiVersion: 'v1',
+        kind:       'Service',
+        metadata:   { namespace, name, labels },
+        spec:       {
+          ...(sidecar.nodePort ? { type: 'NodePort' } : {}),
+          selector: { app: name },
+          ports:    [{ name: sidecar.scheme || 'http', port: sidecar.port, targetPort: 'http' }],
+        },
+      }),
+    });
+
+    return;
+  }
+
+  let changed = false;
+
+  if (sidecar.nodePort && service.spec?.type !== 'NodePort') {
+    service.spec.type = 'NodePort';
+    changed = true;
+  }
+
+  // The port the declaration now names. Figma was declared on 3000 and listens on 8000, so its
+  // Service pointed at a port nothing was bound to and every link to it was dead; correcting the
+  // declaration has to correct the Service too, or the fix reaches only new workspaces. The
+  // existing entry is edited rather than replaced, so an assigned nodePort is not given up.
+  const entry = service.spec?.ports?.[0];
+
+  if (entry && entry.port !== sidecar.port) {
+    entry.port = sidecar.port;
+    entry.name = sidecar.scheme || 'http';
+    entry.targetPort = 'http';
+    changed = true;
+  }
+
+  if (changed) {
+    await devFetch(url, { method: 'PUT', body: JSON.stringify(service) });
+  }
+}
+
+/** Where a sidecar with a node port answers, for the browser rather than for a pod. */
+export async function sidecarNodePort(workspace: string, sidecar: DevSidecar): Promise<number> {
+  const namespace = workspaceNamespace(workspace);
+  const url = `${ BASE }/v1/services/${ namespace }/${ sidecarName(workspace, sidecar.id) }`;
+  const service = await devFetch(url).catch(() => null);
+
+  return service?.spec?.ports?.[0]?.nodePort || 0;
+}
+
+/**
+ * The auth provider a workspace has asked its own Rancher to use, and what came of it.
+ *
+ * A ConfigMap rather than a call, because the thing that carries it out is the manager sidecar and
+ * it is not always running: a choice made while it is down has to still be there when it comes
+ * back, exactly as the closet keeps it in `.env` so its bootstraps re-apply it. See AUTH_SCRIPT.
+ */
+export const AUTH_CONFIG_MAP = 'dev-auth';
+
+export interface DevAuthState {
+  /** What was asked for. Empty means local users only. */
+  wanted: string;
+  /** What the manager last got this Rancher to accept, which is empty until it has. */
+  applied: string;
+  /** The manager's own sentence about the last attempt. */
+  message: string;
+  at: string;
+}
+
+export async function workspaceAuth(workspace: string): Promise<DevAuthState> {
+  const namespace = workspaceNamespace(workspace);
+  const config = await devFetch(`${ BASE }/v1/configmaps/${ namespace }/${ AUTH_CONFIG_MAP }`).catch(() => null);
+  const data = config?.data || {};
+
+  return {
+    wanted:  data.provider || '',
+    applied: data.applied || '',
+    message: data.message || '',
+    at:      data.at || '',
+  };
+}
+
+/**
+ * Ask for a provider. Only the request is written here.
+ *
+ * `applied` is deliberately left alone rather than cleared: it is the manager's, and blanking it
+ * would make the card claim nothing is configured during the twenty seconds before the manager
+ * notices, which is the opposite of what is true.
+ */
+export async function setWorkspaceAuth(workspace: string, provider: string): Promise<void> {
+  const namespace = workspaceNamespace(workspace);
+  const url = `${ BASE }/v1/configmaps/${ namespace }/${ AUTH_CONFIG_MAP }`;
+  const existing = await devFetch(url).catch(() => null);
+
+  if (existing) {
+    await devFetch(url, {
+      method: 'PUT',
+      body:   JSON.stringify({ ...existing, data: { ...(existing.data || {}), provider } }),
+    });
+
+    return;
+  }
+
+  await devFetch(`${ BASE }/v1/configmaps`, {
+    method: 'POST',
+    body:   JSON.stringify({
+      apiVersion: 'v1',
+      kind:       'ConfigMap',
+      metadata:   { namespace, name: AUTH_CONFIG_MAP, labels: { [LABEL_WORKSPACE]: workspace } },
+      data:       { provider },
+    }),
+  });
 }
 
 /**
@@ -2017,14 +2157,20 @@ export async function restartSidecar(workspace: string, sidecar: DevSidecar, tem
   }
 
   // The scripts and the secrets are rewritten first, since picking up a change to them is what a
-  // restart is usually for.
+  // restart is usually for. Generated keys are filled in here as well as on the start path,
+  // because a template that has since declared a new one (the auth switch added two) would
+  // otherwise mirror nothing for it, and the sidecar would come back without a value it needs.
   await ensureSidecarScripts(workspace, sidecar);
-  await mirrorSecrets(workspace, template);
+  await mirrorSecrets(workspace, template, await ensureGeneratedSecrets(template));
+  await ensureSidecarService(workspace, sidecar);
 
   const meta = deployment.spec.template.metadata;
 
   meta.annotations = { ...(meta.annotations || {}), 'dev.rancher.io/restarted-at': new Date().toISOString() };
   deployment.spec.replicas = 1;
+  // Today's declaration, for the reason the start path takes it: a restart is what someone presses
+  // when the product has changed its mind about what this pod should be.
+  deployment.spec.template.spec = sidecarPodSpec(workspace, sidecar);
 
   await devFetch(url, { method: 'PUT', body: JSON.stringify(deployment) });
 }

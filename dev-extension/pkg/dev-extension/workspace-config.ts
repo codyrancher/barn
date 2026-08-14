@@ -109,21 +109,36 @@ base.devServer = {
   hot:             true,
   webSocketServer: { type: 'ws', options: { path: '/ws' } },
   client:          {
-    // Hot reload rides the same proxy, and only when there is one. The sentinels are
-    // webpack-dev-server's own "infer it from window.location" values and only the path is ours,
-    // but 'auto' is a sentinel the *server* substitutes as it serves the client: reached
-    // directly, nothing substitutes it, the client hands 'auto' to the WebSocket constructor and
-    // the browser throws before the app mounts. Symptom: a page that stays on its loading spinner
-    // for ever and makes no API calls at all. Served at its own origin the defaults are already
-    // right, so the override is simply absent.
-    ...(proxyPath ? {
-      webSocketURL: {
-        protocol: 'auto',
-        hostname: '0.0.0.0',
-        port:     0,
-        pathname: proxyPath + '/ws'
-      }
-    } : {}),
+    // Hot reload rides the same proxy when there is one, and the page's own origin when there is
+    // not. Either way this has to be written out, because the shell's config has an address of its
+    // own in it and that address is not where this server is.
+    //
+    // Behind the proxy only the path is ours; the rest are webpack-dev-server's "infer it from
+    // window.location" sentinels. 'auto' is one the *server* substitutes as it serves the client.
+    //
+    // Served at its own origin the sentinels are still needed, and leaving them out was a real
+    // bug rather than a tidy default. The shell's own config sets a fixed
+    // wss://localhost:8005/ws, which is right on a laptop running the dev server and wrong
+    // everywhere else: the browser then opened a hot-reload socket to whatever was on port 8005
+    // of the machine the browser is on, and displayed that server's compile errors over this
+    // dashboard. Seen here as a webpack overlay full of a completely different project's module
+    // resolution failures, sitting on top of the workspace's login form and swallowing clicks.
+    //
+    // 0.0.0.0 and 0 are webpack-dev-server's own "take it from window.location" sentinels. The
+    // protocol is written out rather than left as 'auto', because 'auto' is substituted by the
+    // server as it serves the client and is handed to the WebSocket constructor unchanged when
+    // the page was loaded directly. This server is https at its own origin, so wss.
+    webSocketURL: proxyPath ? {
+      protocol: 'auto',
+      hostname: '0.0.0.0',
+      port:     0,
+      pathname: proxyPath + '/ws'
+    } : {
+      protocol: 'wss',
+      hostname: '0.0.0.0',
+      port:     0,
+      pathname: '/ws'
+    },
     // The compile-error overlay would cover the whole framed dashboard for whoever is looking
     // when an edit fails to compile.
     overlay: false

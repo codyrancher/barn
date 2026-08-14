@@ -16,9 +16,10 @@ import { BadgeState } from '@components/BadgeState';
 import { RcButton } from '@components/RcButton';
 import AsyncButton from '@shell/components/AsyncButton';
 import { colorForState, stateDisplay } from '@shell/plugins/dashboard-store/resource-class';
+import LabeledSelect from '@shell/components/form/LabeledSelect';
 import {
   listSidecars, startSidecar, stopSidecar, restartSidecar, sidecarProxyUrl, sidecarServiceUrl,
-  templateSecretKey
+  templateSecretKey, workspaceAuth, setWorkspaceAuth, sidecarNodePort
 } from '../api';
 import { templateById } from '../templates';
 
@@ -28,7 +29,7 @@ export default {
   name: 'WorkspaceSidecars',
 
   components: {
-    Card, Banner, BadgeState, RcButton, AsyncButton
+    Card, Banner, BadgeState, RcButton, AsyncButton, LabeledSelect
   },
 
   props: {
@@ -45,6 +46,15 @@ export default {
   data() {
     return {
       states:       {},
+      // What the workspace has asked its own Rancher to use, and what the manager made of it.
+      auth:         {
+        wanted: '', applied: '', message: '', at: ''
+      },
+      // The mode each auth card is offering, which is the applied one where there is one so that
+      // the control opens on what is true rather than on the first entry in the list.
+      chosen:       {},
+      // The node port the cluster assigned a sidecar that asked for one, by id.
+      nodePorts:    {},
       error:        '',
       copied:       '',
       copyTimer:    null,
@@ -75,6 +85,11 @@ export default {
     running() {
       return Object.values(this.states).filter((state) => state.state === 'running').length;
     },
+
+    /** The sidecar that owns this workspace's Rancher, which is the one that applies an auth choice. */
+    rancherSidecar() {
+      return this.sidecars.find((sidecar) => sidecar.providesApi) || null;
+    },
   },
 
   mounted() {
@@ -89,9 +104,78 @@ export default {
   methods: {
     async refresh() {
       try {
-        this.states = await listSidecars(this.workspace.name, this.sidecars, this.template);
+        const [states, auth] = await Promise.all([
+          listSidecars(this.workspace.name, this.sidecars, this.template),
+          workspaceAuth(this.workspace.name),
+        ]);
+
+        this.states = states;
+        this.auth = auth;
+
+        // Only for the sidecars that asked for one, and only while they are running: an assigned
+        // node port is the cluster's answer rather than anything declared here.
+        for (const sidecar of this.sidecars.filter((candidate) => candidate.nodePort)) {
+          this.nodePorts = { ...this.nodePorts, [sidecar.id]: await sidecarNodePort(this.workspace.name, sidecar) };
+        }
+
+        for (const sidecar of this.sidecars.filter((candidate) => candidate.auth)) {
+          if (!this.chosen[sidecar.id]) {
+            const mine = sidecar.auth.find((mode) => mode.value === auth.wanted);
+
+            this.chosen = { ...this.chosen, [sidecar.id]: (mine || sidecar.auth[0]).value };
+          }
+        }
       } catch (e) {
         this.error = e.message || String(e);
+      }
+    },
+
+    /**
+     * Whether this card can offer to point Rancher at itself.
+     *
+     * Both sides have to be up, and it is the manager that carries it out, so a request made while
+     * either is down would sit unapplied with nothing to say why.
+     */
+    canApplyAuth(sidecar) {
+      return this.stateOf(sidecar) === 'running' && !!this.rancherSidecar &&
+        this.stateOf(this.rancherSidecar) === 'running';
+    },
+
+    /** The mode of this card's that Rancher is actually using, if any. */
+    appliedMode(sidecar) {
+      return (sidecar.auth || []).find((mode) => mode.value === this.auth.applied) || null;
+    },
+
+    /** Asked for, not yet reported back by the manager. */
+    pendingAuth(sidecar) {
+      return (sidecar.auth || []).some((mode) => mode.value === this.auth.wanted) &&
+        this.auth.applied !== this.auth.wanted;
+    },
+
+    async applyAuth(sidecar, done) {
+      this.error = '';
+
+      try {
+        await setWorkspaceAuth(this.workspace.name, this.chosen[sidecar.id]);
+        await this.refresh();
+        done(true);
+      } catch (e) {
+        this.error = e.message || String(e);
+        done(false);
+      }
+    },
+
+    /** Back to local users only, which is also how the other provider gets disabled. */
+    async clearAuth(done) {
+      this.error = '';
+
+      try {
+        await setWorkspaceAuth(this.workspace.name, '');
+        await this.refresh();
+        done(true);
+      } catch (e) {
+        this.error = e.message || String(e);
+        done(false);
       }
     },
 
@@ -148,8 +232,36 @@ export default {
       return sidecar.port ? sidecarServiceUrl(this.workspace.name, sidecar) : '';
     },
 
+    /**
+     * Where to send a browser for this sidecar.
+     *
+     * A node port when the declaration asks for one, and that is not a preference: Keycloak
+     * rewrites itself out of a path prefix, so the service proxy can only ever serve it a 404,
+     * which is why it has a node port in the first place. The hostname is this page's rather than
+     * the node's InternalIP, for the reason workspaceOriginUrl gives: the browser reached Rancher
+     * at it, so it can reach the node port at it.
+     */
     url(sidecar) {
-      return sidecar.port ? sidecarProxyUrl(this.workspace.name, sidecar) : '';
+      if (!sidecar.port) {
+        return '';
+      }
+
+      const published = this.nodePorts[sidecar.id];
+
+      if (published) {
+        return `${ sidecar.scheme || 'http' }://${ window.location.hostname }:${ published }/`;
+      }
+
+      return sidecarProxyUrl(this.workspace.name, sidecar);
+    },
+
+    /** How a conversation in this workspace adds an MCP sidecar, once it is running. */
+    mcpCommand(sidecar) {
+      if (!sidecar.mcpPath || this.stateOf(sidecar) !== 'running') {
+        return '';
+      }
+
+      return `claude mcp add --transport http ${ sidecar.id } ${ this.address(sidecar) }:${ sidecar.port }${ sidecar.mcpPath }`;
     },
 
     async start(sidecar, done) {
@@ -306,6 +418,83 @@ export default {
               <span v-else>is what this workspace's dashboard will be pointed at while this runs.</span>
             </p>
 
+            <!--
+              An MCP server has nothing to open, so what its card offers is the line that adds it
+              to a conversation in this workspace. In-cluster address, because the thing that will
+              use it is the workspace's own container.
+            -->
+            <p
+              v-if="mcpCommand(sidecar)"
+              class="workspace-sidecars__image"
+            >
+              {{ mcpCommand(sidecar) }}
+            </p>
+
+            <!--
+              The auth row, which is the closet's: one provider at a time, so applying this one is
+              also turning the other off. The manager is what carries it out, so this writes the
+              request and reads back what the manager said about it.
+            -->
+            <div
+              v-if="sidecar.auth"
+              class="workspace-sidecars__auth"
+            >
+              <div class="workspace-sidecars__auth-row">
+                <span class="workspace-sidecars__auth-label">Rancher auth</span>
+                <LabeledSelect
+                  v-if="sidecar.auth.length > 1"
+                  :value="chosen[sidecar.id]"
+                  :options="sidecar.auth"
+                  option-label="label"
+                  option-key="value"
+                  :reduce="(mode) => mode.value"
+                  :clearable="false"
+                  class="workspace-sidecars__auth-select"
+                  @update:value="(value) => chosen = { ...chosen, [sidecar.id]: value }"
+                />
+                <span v-else>{{ sidecar.auth[0].label }}</span>
+                <AsyncButton
+                  mode="apply"
+                  :action-label="appliedMode(sidecar) ? 'Re-apply' : 'Apply'"
+                  waiting-label="Applying"
+                  success-label="Asked"
+                  :disabled="!canApplyAuth(sidecar)"
+                  @click="(done) => applyAuth(sidecar, done)"
+                />
+                <AsyncButton
+                  v-if="appliedMode(sidecar)"
+                  mode="apply"
+                  action-label="Disable"
+                  waiting-label="Disabling"
+                  success-label="Asked"
+                  @click="(done) => clearAuth(done)"
+                />
+              </div>
+              <!--
+                Three different things, and saying which is which is the point of the row: what
+                Rancher is using now, a request the manager has not got to yet, and why it cannot
+                be asked at all.
+              -->
+              <p
+                v-if="appliedMode(sidecar)"
+                class="workspace-sidecars__auth-state"
+              >
+                Applied: {{ appliedMode(sidecar).label }}. {{ auth.message }}
+              </p>
+              <p
+                v-else-if="pendingAuth(sidecar)"
+                class="workspace-sidecars__auth-state"
+              >
+                Asked for, waiting for the Rancher sidecar to apply it. {{ auth.message }}
+              </p>
+              <p
+                v-else-if="!canApplyAuth(sidecar)"
+                class="workspace-sidecars__auth-state"
+              >
+                Start this and the Rancher sidecar, then Apply.
+              </p>
+            </div>
+
             <div class="workspace-sidecars__links">
               <!--
                 Only where the service proxy can actually serve the thing. Rancher and Keycloak
@@ -448,6 +637,34 @@ export default {
       font-size:     11px;
       text-overflow: ellipsis;
       white-space:   nowrap;
+    }
+
+    &__auth {
+      margin-top:  10px;
+      padding-top: 10px;
+      border-top:  1px solid var(--border);
+    }
+
+    &__auth-row {
+      display:     flex;
+      align-items: center;
+      gap:         10px;
+    }
+
+    &__auth-label {
+      color:     var(--muted);
+      font-size: 12px;
+    }
+
+    // Wide enough for the longest provider name and no wider: the row it sits in is a card's.
+    &__auth-select {
+      width: 140px;
+    }
+
+    &__auth-state {
+      margin-top: 5px;
+      color:      var(--muted);
+      font-size:  12px;
     }
 
     &__links {

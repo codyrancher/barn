@@ -446,23 +446,6 @@ export default {
         font-size:   8px;
         line-height: 1;
       }
-    }
-
-    // The state dot, pulled toward the body text until it is legible on the body background.
-    //
-    // Rancher's state colours are not theme-aware: --success is rgb(0, 112, 50) in both themes,
-    // and only the background moves, so on the dark nav it measures 2.36:1 where a graphical
-    // object needs 3:1. --error and --primary have the same problem. There is no token to switch
-    // to either: the click-badge family is white for error and info in both themes, and the gauge
-    // colours are a different vocabulary.
-    //
-    // So the state colour is kept and mixed toward --body-text, which is the one colour each
-    // theme guarantees against its own background. In dark that lightens it, in light it deepens
-    // it, and the direction is right in both without this file knowing which theme it is in or
-    // inventing a colour of its own. A browser without color-mix ignores the declaration and gets
-    // the state colour unchanged, which is where this started.
-    &__dot .icon-dot {
-      color: color-mix(in srgb, currentColor, var(--body-text) 45%);
 
       &:hover {
         background: var(--nav-hover, var(--accent-btn));
@@ -478,6 +461,26 @@ export default {
           font-weight: 600;
         }
       }
+    }
+
+    // The state dot, pulled toward the body text until it is legible on the body background.
+    //
+    // Rancher's state colours are not theme-aware: --success is rgb(0, 112, 50) in both themes,
+    // and only the background moves, so on the dark nav it measures 2.36:1 where a graphical
+    // object needs 3:1. --error and --primary have the same problem. There is no token to switch
+    // to either: the click-badge family is white for error and info in both themes, and the gauge
+    // colours are a different vocabulary.
+    //
+    // So the state colour is kept and mixed toward --body-text, which is the one colour each
+    // theme guarantees against its own background. In dark that lightens it, in light it deepens
+    // it, and the direction is right in both without this file knowing which theme it is in or
+    // inventing a colour of its own. A browser without color-mix ignores the declaration and gets
+    // the state colour unchanged, which is where this started.
+    // currentColor in a `color` declaration is the inherited value, so this is the state colour
+    // the span carries (text-success and the rest) mixed toward the theme's body text, rather
+    // than a second copy of Rancher's palette written out here.
+    &__dot .icon-dot {
+      color: color-mix(in srgb, currentColor, var(--body-text) 45%);
     }
 
     // The name, truncated rather than wrapped: a row is one line and a workspace name can be
