@@ -678,3 +678,235 @@ export async function countChanges(name: string): Promise<number> {
 function shellQuote(value: string): string {
   return `'${ value.split("'").join(`'\\''`) }'`;
 }
+
+// ---------------------------------------------------------------------------
+// Publishing: from the pod's working tree to an extension Rancher has installed.
+//
+// Rancher loads UI extensions from the index it serves at /v1/uiplugins, which is built from
+// the UIPlugin resources in cattle-ui-plugin-system. An entry whose metadata says
+// `direct: "true"` is loaded by the browser straight from its `endpoint`, as a script tag -
+// that is the mechanism behind Developer Load, and it is the whole of what publishing needs
+// here.
+//
+// So: build in the pod, put the bundle where the pod's dev server already serves static files,
+// and point a UIPlugin at it through the apiserver's service proxy. The browser fetches it on
+// Rancher's own origin, carrying the session it already has, and there is nothing to
+// authenticate and nothing to host.
+//
+// What this deliberately does not do is add a Helm repository. That is the other route - a
+// chart in a repo, a ClusterRepo pointing at it, the plugin operator downloading and serving
+// the contents - and every part of it is machinery this does not need: Rancher would have to
+// reach the pod server-side, the operator would have to be installed, and the result is the
+// same extension loaded from the same pod. The trade is real and worth knowing: an extension
+// published this way lives exactly as long as the pod serving it does. It is a dev loop, not a
+// release.
+// ---------------------------------------------------------------------------
+
+/** Where Rancher keeps the resources behind its /v1/uiplugins index. */
+const PLUGIN_NS = 'cattle-ui-plugin-system';
+
+/** Under /app/public, which the pod's dev server serves at the root of the proxy path. */
+const PUBLISHED_DIR = 'plugins';
+
+/**
+ * The package's name, version and Rancher annotations, read out of the tree rather than assumed.
+ *
+ * By reading the file and parsing it here rather than by running `node -p` in the pod. The node
+ * version worked when it was pasted into a shell and returned nothing at all through the exec
+ * websocket, and chasing that is time spent on a quoting problem that did not need to exist:
+ * the command had a JavaScript expression inside double quotes inside a single-quoted `sh -c`
+ * inside a query parameter. `cat` has none of those layers, and the browser can parse JSON.
+ *
+ * The annotations matter as much as the name. Rancher's dashboard refuses to load an extension
+ * whose entry carries no `catalog.cattle.io/ui-extensions-version`, and says so only as
+ * `plugins.error.apiAnnotationMissing` in a store nobody is looking at, so the symptom is an
+ * extension that installs cleanly, reports Ready, and never appears. A published chart carries
+ * these across from package.json; this does the same thing by hand.
+ */
+interface PackageIdentity {
+  name: string;
+  version: string;
+  annotations: Record<string, string>;
+}
+
+async function packageIdentity(name: string): Promise<PackageIdentity> {
+  const raw = await readExtensionFile(name, 'package.json');
+
+  try {
+    const parsed = JSON.parse(raw);
+
+    return {
+      name:        parsed.name,
+      version:     parsed.version,
+      annotations: parsed.rancher?.annotations || {},
+    };
+  } catch {
+    throw new Error(`could not read the package.json of ${ name }: ${ raw.trim() || 'no output' }`);
+  }
+}
+
+export interface PublishResult {
+  plugin: string;
+  version: string;
+  url: string;
+  log: string;
+}
+
+/**
+ * The steps a publish goes through, in order, so the page can say which one it is on.
+ *
+ * Named here rather than in the page because the page cannot know: only this file knows that
+ * "building" and "copying it where the dev server can serve it" are two separate things, and a
+ * bar that counted them differently from the code that runs them would be a bar that lies.
+ */
+export const PUBLISH_STAGES = [
+  'Reading the package',
+  'Building the extension',
+  'Serving it from the pod',
+  'Installing it into Rancher',
+];
+
+export type PublishProgress = (stage: number, label: string, total: number) => void;
+
+/** Thrown with the output attached, because a build failure is only diagnosable from its log. */
+export class PublishError extends Error {
+  log: string;
+  stage: string;
+
+  constructor(message: string, stage: string, log: string) {
+    super(message);
+    this.name = 'PublishError';
+    this.stage = stage;
+    this.log = log;
+  }
+}
+
+/**
+ * Build the extension in its own pod and install it into this Rancher.
+ *
+ * The build is `build-pkg`, run in the pod, and it takes minutes: it is a production build of
+ * the package against the shell. It is one exec that stays open for the duration rather than
+ * something polled, because the output is the only diagnostic there is when it fails.
+ */
+export async function publishExtension(name: string, onProgress?: PublishProgress): Promise<PublishResult> {
+  const total = PUBLISH_STAGES.length;
+  const report = (stage: number) => onProgress?.(stage, PUBLISH_STAGES[stage - 1], total);
+  const pod = await extensionPod(name);
+
+  if (!pod) {
+    throw new PublishError(`${ name } has no running pod to build in`, PUBLISH_STAGES[0], '');
+  }
+
+  report(1);
+
+  const { name: plugin, version, annotations } = await packageIdentity(name);
+  const built = `${ plugin }-${ version }`;
+
+  report(2);
+
+  // `2>&1` because build-pkg says everything useful on stderr, and this exec reads only stdout.
+  const log = await podExecOnce(pod, asPodUser(
+    `cd /app && ./node_modules/@rancher/shell/scripts/build-pkg.sh ${ plugin } 2>&1`
+  ));
+
+  const bundle = `dist-pkg/${ built }/${ built }.umd.min.js`;
+  const builtOk = await podExecOnce(pod, asPodUser(`test -f /app/${ bundle } && echo yes`));
+
+  if (!builtOk.includes('yes')) {
+    throw new PublishError(`${ plugin } did not build`, PUBLISH_STAGES[1], log);
+  }
+
+  report(3);
+
+  // /app/public is what the dev server serves at the root of the proxy path, so a copy in there
+  // is reachable at a URL on Rancher's own origin without anything else being started.
+  const copyLog = await podExecOnce(pod, asPodUser([
+    'cd /app',
+    `mkdir -p public/${ PUBLISHED_DIR }`,
+    `rm -rf public/${ PUBLISHED_DIR }/${ built }`,
+    `cp -r dist-pkg/${ built } public/${ PUBLISHED_DIR }/${ built }`,
+    'echo BARN-COPY-OK',
+  ].join(' && ')));
+
+  if (!copyLog.includes('BARN-COPY-OK')) {
+    throw new PublishError('the built bundle could not be copied where the pod serves it', PUBLISH_STAGES[2], `${ log }\n${ copyLog }`);
+  }
+
+  report(4);
+
+  // Cache-busting on the URL rather than trust in noCache. The browser has almost certainly
+  // loaded this exact path before, and a republish that serves the previous bundle is the
+  // failure this whole button exists to avoid. The stamp is the pod's own clock, which is the
+  // only clock that knows when the build happened.
+  const stamp = (await podExecOnce(pod, asPodUser('date +%s'))).trim();
+  const url = `${ extensionProxyPath(name) }/${ PUBLISHED_DIR }/${ built }/${ built }.umd.min.js?t=${ stamp }`;
+
+  try {
+    await upsertUiPlugin(plugin, version, url, annotations);
+  } catch (e: any) {
+    throw new PublishError(e?.message || String(e), PUBLISH_STAGES[3], log);
+  }
+
+  return {
+    plugin, version, url, log
+  };
+}
+
+/**
+ * Create or update the UIPlugin that makes Rancher load it.
+ *
+ * PUT rather than delete-and-create on an update: the resource is what Rancher's index is built
+ * from, and removing it even briefly is an extension disappearing out of somebody's nav.
+ */
+async function upsertUiPlugin(
+  plugin: string, version: string, url: string, annotations: Record<string, string>
+): Promise<void> {
+  const body = {
+    apiVersion: 'catalog.cattle.io/v1',
+    kind:       'UIPlugin',
+    metadata:   { namespace: PLUGIN_NS, name: plugin },
+    spec:       {
+      plugin: {
+        name:     plugin,
+        version,
+        endpoint: url,
+        noCache:  true,
+        metadata: {
+          ...annotations,
+          // What makes the browser load `endpoint` itself instead of asking Rancher to serve
+          // the plugin's files from a chart it downloaded. See extension-manager-impl.js.
+          direct: 'true',
+        },
+      },
+    },
+  };
+
+  const type = 'catalog.cattle.io.uiplugins';
+  const existing = await rancherFetch(`${ EXT_BASE }/v1/${ type }/${ PLUGIN_NS }/${ plugin }`).catch(() => null);
+
+  if (existing) {
+    await rancherFetch(`${ EXT_BASE }/v1/${ type }/${ PLUGIN_NS }/${ plugin }`, {
+      method: 'PUT',
+      body:   JSON.stringify({ ...existing, spec: body.spec }),
+    });
+
+    return;
+  }
+
+  await rancherFetch(`${ EXT_BASE }/v1/${ type }`, { method: 'POST', body: JSON.stringify(body) });
+}
+
+/** What is installed right now, so the button can say "update" rather than "install". */
+export async function publishedVersion(name: string): Promise<string> {
+  const plugin = await packageIdentity(name).then((identity) => identity.name).catch(() => '');
+
+  if (!plugin) {
+    return '';
+  }
+
+  const existing = await rancherFetch(
+    `${ EXT_BASE }/v1/catalog.cattle.io.uiplugins/${ PLUGIN_NS }/${ plugin }`
+  ).catch(() => null);
+
+  return existing?.spec?.plugin?.version || '';
+}

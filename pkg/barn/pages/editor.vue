@@ -19,9 +19,11 @@ import { RcIcon } from '@components/RcIcon';
 import PodTerminal from '../components/PodTerminal.vue';
 import ExtensionSelect from '../components/ExtensionSelect.vue';
 import ClaudeMark from '../components/ClaudeMark.vue';
+import AsyncButton from '@shell/components/AsyncButton';
+import PublishStatus from '../components/PublishStatus.vue';
 import ExtensionFilesModal from '../components/ExtensionFilesModal.vue';
 import {
-  ensureExtension, extensionReady, extensionUrl, DEFAULT_EXTENSION
+  ensureExtension, extensionReady, extensionUrl, publishExtension, DEFAULT_EXTENSION
 } from '../extensions';
 import { EXTENSION_STARTING_ROUTE } from '../editor-product';
 
@@ -65,7 +67,7 @@ export default {
   name: 'BarnEditor',
 
   components: {
-    RcIcon, PodTerminal, ExtensionSelect, ExtensionFilesModal, ClaudeMark
+    RcIcon, PodTerminal, ExtensionSelect, ExtensionFilesModal, ClaudeMark, AsyncButton, PublishStatus
   },
 
   data() {
@@ -80,6 +82,14 @@ export default {
       // Whether the source browser is open. The left bar is about the source and about claude,
       // and this is the first thing on it.
       showFiles: false,
+      // What the last publish did and said. The stage is what the bar counts; the log is kept
+      // whether it worked or not, because a build log is worth reading either way.
+      publishStage: 0,
+      publishTotal: 0,
+      publishLabel: '',
+      publishError: '',
+      publishLog:   '',
+      published:    '',
     };
   },
 
@@ -211,6 +221,39 @@ export default {
       this.$router.push({ name: this.$route.name, params: { extension: name } });
     },
 
+    /**
+     * Build this extension and install it into the Rancher around us.
+     *
+     * Minutes, not seconds: it is a production build of a Rancher package, run in the pod, and
+     * the socket stays open for the whole of it. AsyncButton is what makes that bearable - it
+     * says it is working and refuses a second press.
+     */
+    async publish(done) {
+      this.publishError = '';
+      this.published = '';
+      this.publishLog = '';
+
+      try {
+        const result = await publishExtension(this.extension, (stage, label, total) => {
+          this.publishStage = stage;
+          this.publishLabel = label;
+          this.publishTotal = total;
+        });
+
+        this.published = `${ result.plugin } ${ result.version }`;
+        this.publishLog = result.log;
+        done(true);
+      } catch (e) {
+        this.publishError = e.message || String(e);
+        // PublishError carries the output and the step it died at; anything else is a message.
+        this.publishLog = e.log || '';
+        this.publishLabel = e.stage || this.publishLabel;
+        done(false);
+      } finally {
+        this.publishStage = 0;
+      }
+    },
+
     createExtension(name) {
       ensureExtension(name);
       this.$router.push({ name: EXTENSION_STARTING_ROUTE, params: { extension: name } });
@@ -245,6 +288,24 @@ export default {
       </div>
       <div class="mc-editor__bar-gap" />
       <div class="mc-editor__bar mc-editor__bar--right">
+        <AsyncButton
+          class="mc-editor__publish"
+          mode="edit"
+          action-label="Publish"
+          waiting-label="Building"
+          success-label="Published"
+          error-label="Build failed"
+          size="sm"
+          @click="publish"
+        />
+        <PublishStatus
+          :stage="publishStage"
+          :total="publishTotal"
+          :label="publishLabel"
+          :error="publishError"
+          :log="publishLog"
+          :done="published"
+        />
         <ExtensionSelect
           class="mc-editor__bar-select"
           :value="extension"
@@ -372,6 +433,19 @@ $divider-width: 8px;
 
   &__bar-note {
     color: var(--muted, #6c6c76);
+    // A build failure is a paragraph of webpack, and this bar is one line. The whole of it is
+    // on the title attribute; what shows is enough to know it failed.
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  &__bar-error {
+    color: var(--error, #f64747);
+  }
+
+  &__publish {
+    flex: 0 0 auto;
   }
 
   // Hard against the right edge, where the link to a new tab used to be. The bar is otherwise
