@@ -1,12 +1,12 @@
 // Push the generated seed into the running pod's ConfigMap.
 //
 // The pod runs its scripts out of /seed, which is a ConfigMap mount, and that ConfigMap is
-// written by the magic-closet extension from the file this script reads. So editing anything in
+// written by the barn extension from the file this script reads. So editing anything in
 // dev-extension/pod/ has three steps, and skipping the last one is the trap:
 //
 //   1. edit dev-extension/pod/<file>
-//   2. node rancher-extension/scripts/gen-dev-extension-seed.mjs
-//   3. node rancher-extension/scripts/apply-dev-extension-seed.mjs   <- this
+//   2. node scripts/gen-dev-extension-seed.mjs
+//   3. node scripts/apply-dev-extension-seed.mjs   <- this
 //
 // Without the third, the change reaches a fresh pod and never the running one. Patching the
 // ConfigMap by hand instead of from the generated seed is worse than not doing it: the two then
@@ -17,7 +17,7 @@
 // is not in /seed the instant this exits. Existing tmux sessions keep the script they started
 // with; a new session picks up the new one.
 //
-//   node rancher-extension/scripts/apply-dev-extension-seed.mjs
+//   node scripts/apply-dev-extension-seed.mjs
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,11 +25,11 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const OWNER = path.join(here, '..', 'pkg', 'magic-closet', 'dev-extension.ts');
-const SEED = path.join(here, '..', 'pkg', 'magic-closet', 'dev-extension-seed.generated.ts');
+const OWNER = path.join(here, '..', 'pkg', 'barn', 'dev-extension.ts');
+const SEED = path.join(here, '..', 'pkg', 'barn', 'dev-extension-seed.generated.ts');
 
-const NAMESPACE = 'magic-closet';
-const NAME = 'magic-closet-dev-extension';
+const NAMESPACE = 'barn';
+const NAME = 'barn-dev-extension';
 
 /** Read `export const NAME = 'value';` out of a TypeScript source, as the generator does. */
 function tsConstant(file, name) {

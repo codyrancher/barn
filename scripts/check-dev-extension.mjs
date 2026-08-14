@@ -30,7 +30,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(here, '..');
-const PKG = path.join(ROOT, 'dev-extension', 'pkg', 'dev-extension');
+const PKG = path.join(ROOT, 'pkg', 'barn', 'dev-extension', 'pkg', 'dev-extension');
 
 /** Extensions an import can be written without, in the order a bundler would try them. */
 const EXTENSIONS = ['', '.ts', '.vue', '.js', '.mjs', '.json', '/index.ts', '/index.js', '/index.vue'];
@@ -125,7 +125,7 @@ function typeErrors() {
   const tsc = path.join(ROOT, 'node_modules', '.bin', 'tsc');
 
   if (!fs.existsSync(tsc)) {
-    return ['typescript is not installed in rancher-extension/node_modules'];
+    return ['typescript is not installed in node_modules'];
   }
 
   let output = '';

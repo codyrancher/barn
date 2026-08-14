@@ -18,8 +18,8 @@
 # Needs kubectl pointed at the cluster the extension created the pod in.
 set -euo pipefail
 
-NAMESPACE=magic-closet
-APP=magic-closet-dev-extension
+NAMESPACE=barn
+APP=barn-dev-extension
 CONTAINER=devserver
 
 # The pod's tree is owned by the node user (see pod/boot.sh); exec arrives as
@@ -27,7 +27,7 @@ CONTAINER=devserver
 # pod's own claude could not then edit.
 POD_UID=1000
 
-SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../dev-extension" && pwd)"
+SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../pkg/barn/dev-extension" && pwd)"
 
 wait_for_compile=true
 # How many deleted source files this is willing to act on without being told to. A source change

@@ -1,0 +1,29 @@
+{
+  "name": "barn",
+  "description": "Provision and manage closet dev environments from Rancher",
+  "version": "0.5.15",
+  "private": false,
+  "icon": "https://rancher.github.io/ui-internal-tools/ai/magic-closet/logo.svg",
+  "homepage": "https://github.com/codyrancher/barn",
+  "rancher": {
+    "annotations": {
+      "catalog.cattle.io/display-name": "Barn",
+      "catalog.cattle.io/rancher-version": ">= 2.10.0",
+      "catalog.cattle.io/ui-extensions-version": ">= 3.0.0 < 4.0.0"
+    }
+  },
+  "scripts": {},
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "@vue/cli-plugin-babel": "5.0.9",
+    "@vue/cli-service": "5.0.8",
+    "@vue/cli-plugin-typescript": "5.0.9"
+  },
+  "browserslist": [
+    "> 1%",
+    "last 2 versions",
+    "not dead"
+  ]
+}

@@ -1,0 +1,14 @@
+nav:
+  group:
+    barn: Barn
+product:
+  barn-editor: Editor
+typeLabel:
+  barn.closet: |-
+    {count, plural,
+      one { Closet }
+      other { Closets }}
+  barn.secret-set: |-
+    {count, plural,
+      one { Secret Set }
+      other { Secret Sets }}

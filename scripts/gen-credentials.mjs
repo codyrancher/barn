@@ -1,5 +1,5 @@
 // Bakes the closet secret-set's credential model from the sidecar declarations
-// into pkg/magic-closet/credentials.generated.ts — the single source of truth is
+// into pkg/barn/credentials.generated.ts — the single source of truth is
 // workspace/sidecars/**/sidecar.yml (`credentials:`) + workspace/sidecars/
 // credential-groups.yml (group order/descriptions + `core` credentials).
 //
@@ -7,7 +7,7 @@
 // `usage` so the page can show "used by figma: ...; rancher-browser: ...".
 //
 // Run after editing any credential declaration:
-//   node rancher-extension/scripts/gen-credentials.mjs
+//   node scripts/gen-credentials.mjs
 // (needs js-yaml resolvable; e.g. NODE_PATH=workspace/api/node_modules, or run
 //  it from a context where js-yaml is installed). The generated file is committed
 //  so normal builds don't need to run this.
@@ -17,7 +17,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(here, '../..');                 // the magic-closet project root
+const root = path.resolve(here, '../..');                 // the closet project root, beside this one
 const sidecarsDir = path.join(root, 'workspace', 'sidecars');
 
 // Resolve js-yaml from the extension's node_modules if present, else the api's
@@ -32,11 +32,11 @@ try {
   try {
     yaml = require(path.join(root, 'workspace', 'api', 'node_modules', 'js-yaml'));
   } catch {
-    console.error('gen-credentials: js-yaml not found — run `yarn install` in rancher-extension or workspace/api first.');
+    console.error('gen-credentials: js-yaml not found — run `yarn install` in barn or workspace/api first.');
     process.exit(1);
   }
 }
-const outFile = path.join(here, '..', 'pkg', 'magic-closet', 'credentials.generated.ts');
+const outFile = path.join(here, '..', 'pkg', 'barn', 'credentials.generated.ts');
 
 const load = (p) => yaml.load(readFileSync(p, 'utf-8')) || {};
 

@@ -14,3 +14,4 @@ dynamic-importer.js
 ksconfig.json
 shell/utils/dynamic-importer.js
 shell/assets/fonts
+pkg/barn/dev-extension

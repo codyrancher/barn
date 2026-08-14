@@ -1,0 +1,58 @@
+# The `closet` container image: the dev environment a closet runs (node/nvm
+# toolchain, claude, gh, build tools) WITHOUT the docker engine, because it runs
+# as a plain pod rather than a dind host. Entrypoint sets up /workspace then
+# holds the pod open; the control api runs in its own pod.
+#
+# This is the one image charts/closet deploys that is built here. The api image
+# beside it in values.yaml is still built and published by the closet project,
+# which is also where the sidecar declarations credentials.generated.ts is made
+# from live. Nothing in barn needs either at build time: the chart pulls both
+# from ghcr, and the DevExtension's own workspaces run stock node:24 with a
+# command, so they have no image of their own at all.
+FROM node:22-bookworm
+
+# Workspace toolchain (mirrors the root image's toolchain, minus docker/dind).
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    ca-certificates \
+    build-essential \
+    python3 \
+    python-is-python3 \
+    gosu \
+    tmux \
+    procps \
+    jq \
+    ripgrep \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Claude Code CLI (native binary)
+RUN CLAUDE_VERSION=$(curl -fsSL https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest) \
+    && CLAUDE_PLAT="linux-$(dpkg --print-architecture | sed 's/amd64/x64/')" \
+    && curl -fsSL -o /usr/local/bin/claude "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/${CLAUDE_VERSION}/${CLAUDE_PLAT}/claude" \
+    && chmod +x /usr/local/bin/claude
+
+# nvm + the shared-toolchain installer (entrypoint runs it into /opt/toolchain).
+COPY --chmod=755 workspace/setup-node.sh /usr/local/bin/setup-node
+RUN mkdir -p /opt/nvm /opt/toolchain \
+    && curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | NVM_DIR=/opt/nvm PROFILE=/dev/null bash
+
+# The shared node (/opt/toolchain/node/bin) + the tools bin on PATH everywhere.
+ENV PATH="/opt/toolchain/node/bin:/shared/tools/bin:${PATH}"
+RUN L='export PATH="/opt/toolchain/node/bin:/shared/tools/bin:$PATH"'; \
+    printf '%s\n' "$L" > /etc/profile.d/magic-closet-tools.sh; \
+    printf '%s\n' "$L" >> /etc/bash.bashrc
+
+# Scaffold seeded into /workspace on first boot.
+COPY workspace/template /opt/magic-closet/template
+COPY --chmod=755 workspace/closet/entrypoint.sh /entrypoint.sh
+
+WORKDIR /workspace
+ENTRYPOINT ["/entrypoint.sh"]
