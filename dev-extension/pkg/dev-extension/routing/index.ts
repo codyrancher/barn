@@ -3,19 +3,18 @@ import { PluginRouteRecordRaw } from '@shell/core/types';
 import {
   PRODUCT_NAME, CUSTOM_PAGE_NAME, BLANK_CLUSTER, HOME_ROUTE,
   EXPLORER_PRODUCT, FLOOF_PAGE, FLOOF_ROUTE,
-  DEV_PRODUCT, WORKSPACES_PAGE, TEMPLATES_PAGE, CREATE_PAGE,
-  TERMINAL_PAGE, MY_WORK_PAGE, SETTINGS_PAGE,
-  WORKSPACES_ROUTE, WORKSPACE_ROUTE, CREATE_ROUTE, TEMPLATES_ROUTE,
-  TERMINAL_ROUTE, MY_WORK_ROUTE, SETTINGS_ROUTE
+  DEV_PRODUCT, WORKSPACES_PAGE, CREATE_PAGE, MY_WORK_PAGE, INSIGHTS_PAGE, SETTINGS_PAGE,
+  DEV_SHELL_ROUTE, WORKSPACES_ROUTE, WORKSPACE_ROUTE, CREATE_ROUTE,
+  MY_WORK_ROUTE, INSIGHTS_ROUTE, SETTINGS_ROUTE
 } from '../config/constants';
 import DevHome from '../pages/DevHome.vue';
 import Floof from '../pages/Floof.vue';
+import DevShell from '../pages/DevShell.vue';
 import Workspaces from '../pages/Workspaces.vue';
 import CreateWorkspace from '../pages/CreateWorkspace.vue';
 import WorkspaceDetail from '../pages/WorkspaceDetail.vue';
-import Templates from '../pages/Templates.vue';
-import GlobalTerminal from '../pages/GlobalTerminal.vue';
 import MyWork from '../pages/MyWork.vue';
+import Insights from '../pages/Insights.vue';
 import Settings from '../pages/Settings.vue';
 
 /**
@@ -59,76 +58,67 @@ const explorerRoutes: PluginRouteRecordRaw[] = [
   }
 ];
 
+const devMeta = { product: DEV_PRODUCT, cluster: BLANK_CLUSTER };
+
 /**
- * The Dev product's pages.
+ * The Dev product's pages, inside a page template of this product's own.
  *
- * Same shape as ownRoutes above and for the same reasons: `/{product}/c/:cluster/` with
- * BLANK_CLUSTER, and `meta.product` so the shell knows whose nav to draw and which entry to
- * highlight. `meta.cluster` matters as much: without it the shell tries to resolve `_` as a
- * real cluster and the page renders with no nav around it.
+ * `parent: 'blank'` is the shell's barest template, a `<main>` around a router-view, and it is
+ * chosen for what it does not bring. The usual parent, `default`, renders Rancher's product
+ * nav, which is the thing pages/DevShell.vue replaces; `plain` has no nav but wraps the page in
+ * an IndentedPanel that is 90% wide and centred, and the two panes this product is mostly used
+ * through are a terminal and an iframe that want the window. So DevShell supplies the header,
+ * the sidebar and the terminal drawer itself, out of the shell's own components.
  *
- * The create page is deliberately a sibling of the list rather than a child of it. Nested
- * under `workspaces/`, `create` would also match the detail route's `:workspace` param, and
- * which of the two won would come down to registration order.
+ * What that costs, since it is a trade rather than a detail: Rancher's side nav is gone (that
+ * is the point), and Header runs in `simple` mode, which drops the product title block at the
+ * top left. The product switcher, the notifications, the user menu and this extension's own Dev
+ * button are all in the part of the header that stays.
  *
- * Being a sibling costs it the nav highlight, which the shell derives from the path: the list
- * and the detail page light Workspaces up because their paths start with the nav entry's, and
- * `/dev/c/_/create` does not. `meta.nav` is the shell's own answer to exactly that (see
- * isNavItemActive in shell/utils/router.js) - it names the nav path to highlight, with route
- * params substituted in, so `:cluster` resolves to whichever cluster the page was reached at.
+ * Every page below is a child, so they share one sidebar rather than each drawing their own,
+ * and their names are unchanged, so every link written against them still resolves.
+ *
+ * The create page is a sibling of the list rather than a child of it. Nested under
+ * `workspaces/`, `create` would also match the detail route's `:workspace` param, and which of
+ * the two won would come down to registration order.
  */
-const devRoutes: RouteRecordRaw[] = [
+const devRoutes: PluginRouteRecordRaw[] = [
   {
-    name:      WORKSPACES_ROUTE,
-    path:      `/${ DEV_PRODUCT }/c/:cluster/${ WORKSPACES_PAGE }`,
-    component: Workspaces,
-    meta:      { product: DEV_PRODUCT, cluster: BLANK_CLUSTER }
-  },
-  {
-    name:      CREATE_ROUTE,
-    path:      `/${ DEV_PRODUCT }/c/:cluster/${ CREATE_PAGE }`,
-    component: CreateWorkspace,
-    meta:      {
-      product: DEV_PRODUCT,
-      cluster: BLANK_CLUSTER,
-      nav:     `/${ DEV_PRODUCT }/c/:cluster/${ WORKSPACES_PAGE }`
+    parent: 'blank',
+    route:  {
+      name:      DEV_SHELL_ROUTE,
+      path:      `/${ DEV_PRODUCT }/c/:cluster`,
+      component: DevShell,
+      meta:      devMeta,
+      children:  [
+        {
+          name: WORKSPACES_ROUTE, path: WORKSPACES_PAGE, component: Workspaces, meta: devMeta
+        },
+        {
+          name: CREATE_ROUTE, path: CREATE_PAGE, component: CreateWorkspace, meta: devMeta
+        },
+        {
+          // The tab is the hash rather than a path segment. pages/WorkspaceDetail.vue says why.
+          name:      WORKSPACE_ROUTE,
+          path:      `${ WORKSPACES_PAGE }/:workspace`,
+          component: WorkspaceDetail,
+          meta:      devMeta
+        },
+        // There is no terminal page. The terminal is the drawer along the bottom, opened
+        // from the sidebar's terminal icon, and it stays there while you work on whatever
+        // else is on screen. A page whose content was a sentence about another part of the
+        // screen is the thing that was wrong with having one.
+        {
+          name: MY_WORK_ROUTE, path: MY_WORK_PAGE, component: MyWork, meta: devMeta
+        },
+        {
+          name: INSIGHTS_ROUTE, path: INSIGHTS_PAGE, component: Insights, meta: devMeta
+        },
+        {
+          name: SETTINGS_ROUTE, path: SETTINGS_PAGE, component: Settings, meta: devMeta
+        },
+      ],
     }
-  },
-  {
-    // A workspace's tab is not in this path. It is the hash, and pages/WorkspaceDetail.vue
-    // says why: a path segment per tab, which is the shape the harness uses, remounts the page
-    // on every tab click and leaks a shell into the pod each time.
-    name:      WORKSPACE_ROUTE,
-    path:      `/${ DEV_PRODUCT }/c/:cluster/${ WORKSPACES_PAGE }/:workspace`,
-    component: WorkspaceDetail,
-    meta:      { product: DEV_PRODUCT, cluster: BLANK_CLUSTER }
-  },
-  {
-    name:      TEMPLATES_ROUTE,
-    path:      `/${ DEV_PRODUCT }/c/:cluster/${ TEMPLATES_PAGE }`,
-    component: Templates,
-    meta:      { product: DEV_PRODUCT, cluster: BLANK_CLUSTER }
-  },
-  {
-    // `:terminal?` is a terminal's number, so a link can open one. The terminals themselves
-    // live in Rancher's window manager rather than on this page, which is why the page puts the
-    // address back afterwards (see pages/GlobalTerminal.vue).
-    name:      TERMINAL_ROUTE,
-    path:      `/${ DEV_PRODUCT }/c/:cluster/${ TERMINAL_PAGE }/:terminal?`,
-    component: GlobalTerminal,
-    meta:      { product: DEV_PRODUCT, cluster: BLANK_CLUSTER }
-  },
-  {
-    name:      MY_WORK_ROUTE,
-    path:      `/${ DEV_PRODUCT }/c/:cluster/${ MY_WORK_PAGE }`,
-    component: MyWork,
-    meta:      { product: DEV_PRODUCT, cluster: BLANK_CLUSTER }
-  },
-  {
-    name:      SETTINGS_ROUTE,
-    path:      `/${ DEV_PRODUCT }/c/:cluster/${ SETTINGS_PAGE }`,
-    component: Settings,
-    meta:      { product: DEV_PRODUCT, cluster: BLANK_CLUSTER }
   }
 ];
 

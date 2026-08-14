@@ -34,6 +34,18 @@ if ! command -v claude >/dev/null 2>&1; then
   npm install -g --silent @anthropic-ai/claude-code
 fi
 
+# kubectl, so the pod's own ServiceAccount is usable from a terminal. It needs
+# no configuration: in-cluster credentials are mounted and client-go finds them,
+# which is the whole reason the terminals can manage the cluster at all.
+#
+# Pinned to the cluster's version rather than "stable", so what a terminal gets
+# does not change under it on a day when upstream moves.
+if ! command -v kubectl >/dev/null 2>&1; then
+  echo "[tools] installing kubectl"
+  curl -sSLo /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl"
+  chmod 0755 /usr/local/bin/kubectl
+fi
+
 # Answer claude's first-run questions before it can ask them, so a tab opens on
 # a prompt or a login rather than on a theme picker. Idempotent, and a no-op
 # once the flags are set, so it is safe to run on every boot and every tab.

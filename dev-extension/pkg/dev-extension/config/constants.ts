@@ -37,30 +37,37 @@ export const FLOOF_ROUTE = `c-cluster-${ EXPLORER_PRODUCT }-${ FLOOF_PAGE }`;
 export const DEV_PRODUCT = 'dev';
 
 export const WORKSPACES_PAGE = 'workspaces';
-export const TEMPLATES_PAGE = 'templates';
 export const CREATE_PAGE = 'create';
-export const TERMINAL_PAGE = 'terminal';
 export const MY_WORK_PAGE = 'my-work';
+export const INSIGHTS_PAGE = 'insights';
 export const SETTINGS_PAGE = 'settings';
+
+/** The product's own page template, which every page below is a child of. */
+export const DEV_SHELL_ROUTE = `${ DEV_PRODUCT }-c-cluster`;
 
 export const WORKSPACES_ROUTE = `${ DEV_PRODUCT }-c-cluster-${ WORKSPACES_PAGE }`;
 export const WORKSPACE_ROUTE = `${ DEV_PRODUCT }-c-cluster-${ WORKSPACES_PAGE }-workspace`;
 export const CREATE_ROUTE = `${ DEV_PRODUCT }-c-cluster-${ CREATE_PAGE }`;
-export const TEMPLATES_ROUTE = `${ DEV_PRODUCT }-c-cluster-${ TEMPLATES_PAGE }`;
-export const TERMINAL_ROUTE = `${ DEV_PRODUCT }-c-cluster-${ TERMINAL_PAGE }`;
 export const MY_WORK_ROUTE = `${ DEV_PRODUCT }-c-cluster-${ MY_WORK_PAGE }`;
+export const INSIGHTS_ROUTE = `${ DEV_PRODUCT }-c-cluster-${ INSIGHTS_PAGE }`;
 export const SETTINGS_ROUTE = `${ DEV_PRODUCT }-c-cluster-${ SETTINGS_PAGE }`;
 
 /**
  * The tabs a workspace opens as, and the one a link with no tab in it means.
+ *
+ * Conversations is first and is the default, because it is the reason to open a workspace at
+ * all. There is no Overview: what it held was the namespace, the Deployment, the Service and
+ * the pod, which are plumbing, and the two facts on it anyone acts on are elsewhere already,
+ * the state on the sidebar's row and the ports in the Ports tab. A link to `#overview` lands on
+ * Conversations, since an unknown tab falls back to the default.
  *
  * Named here rather than in the page because the route carries a tab (see routing/index.ts):
  * the tab is part of the address so that a tab can be linked to and shared, which is the whole
  * reason it is not component state. The list is also what the page validates against, so a URL
  * naming a tab that does not exist lands on Overview instead of on an empty pane.
  */
-export const WORKSPACE_TABS = ['overview', 'conversations', 'browser', 'ports'];
-export const DEFAULT_WORKSPACE_TAB = 'overview';
+export const WORKSPACE_TABS = ['conversations', 'browser', 'ports', 'sidecars'];
+export const DEFAULT_WORKSPACE_TAB = 'conversations';
 
 /**
  * The pod this dashboard is served from, which is what the global terminal attaches to.

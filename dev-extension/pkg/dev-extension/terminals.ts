@@ -55,21 +55,50 @@ export function openTerminals(store: Store): number[] {
 }
 
 /**
- * The number a new terminal should take: the smallest that is not open.
+ * The next number to hand out: the smallest that is not taken.
  *
  * Smallest rather than one past the largest, so closing Terminal 2 and adding one gives
  * Terminal 2 back, which is also the session it left running. Numbering upwards forever would
  * make every new terminal a new conversation and quietly strand the old ones.
+ *
+ * Shared with a workspace's conversation list, which numbers its panes the same way, so the
+ * two cannot come to disagree about what the numbers mean.
  */
-export function nextTerminalNumber(store: Store): number {
-  const open = openTerminals(store);
+export function nextNumber(taken: number[]): number {
   let n = 1;
 
-  while (open.includes(n)) {
+  while (taken.includes(n)) {
     n += 1;
   }
 
   return n;
+}
+
+export function nextTerminalNumber(store: Store): number {
+  return nextNumber(openTerminals(store));
+}
+
+/**
+ * What the sidebar's terminal icon does: show a terminal, whatever state the drawer is in.
+ *
+ * With nothing open it opens one, so a terminal is one click from anywhere in the product. With
+ * something open it brings that one to the front and reopens the drawer if it was closed, which
+ * is the obvious thing and not a second identical session. Adding more is the drawer's own job,
+ * from the plus in a terminal's controls, the way the harness does it.
+ */
+export function showTerminal(store: Store): number {
+  const open = openTerminals(store);
+
+  if (!open.length) {
+    return openTerminal(store);
+  }
+
+  // The one the drawer was last showing, if it is one of ours, since that is the session the
+  // person was in.
+  const active = store.state.wm?.active?.bottom;
+  const activeNumber = typeof active === 'string' && active.startsWith(TAB_PREFIX) ? Number(active.slice(TAB_PREFIX.length)) : NaN;
+
+  return openTerminal(store, open.includes(activeNumber) ? activeNumber : open[0]);
 }
 
 /**

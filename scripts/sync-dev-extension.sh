@@ -49,6 +49,26 @@ tar -C "$SOURCE" -cf - pkg/dev-extension |
   kubectl -n "$NAMESPACE" exec -i "$pod" -c "$CONTAINER" -- \
     setpriv --reuid="$POD_UID" --regid="$POD_UID" --init-groups tar -C /app -xf -
 
+# A source file deleted here has to be deleted there too.
+#
+# An untar only ever adds and overwrites, so a module removed from the repo stays in the pod and
+# goes on satisfying imports of it. That is not a stale copy of something, it is a build that is
+# green for a reason the repo does not contain, and the first fresh pod is where it is discovered.
+# Only source files are considered, so nothing the pod legitimately keeps (node_modules, a
+# scratch file someone made in there) is touched.
+here=$(cd "$SOURCE" && find pkg/dev-extension -type f \( -name '*.ts' -o -name '*.vue' -o -name '*.js' \) | sort)
+there=$(kubectl -n "$NAMESPACE" exec "$pod" -c "$CONTAINER" -- \
+  sh -c "cd /app && find pkg/dev-extension -type f \( -name '*.ts' -o -name '*.vue' -o -name '*.js' \) | sort" 2>/dev/null || true)
+extra=$(comm -13 <(echo "$here") <(echo "$there") || true)
+
+if [ -n "$extra" ]; then
+  echo "removing files the repo no longer has:"
+  echo "$extra" | sed 's/^/  /'
+  echo "$extra" | tr '\n' '\0' |
+    kubectl -n "$NAMESPACE" exec -i "$pod" -c "$CONTAINER" -- \
+      sh -c 'cd /app && xargs -0 rm -f'
+fi
+
 if [ "$wait_for_compile" = false ]; then
   exit 0
 fi

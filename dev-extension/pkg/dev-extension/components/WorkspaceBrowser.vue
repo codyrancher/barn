@@ -14,6 +14,7 @@
 import { Banner } from '@components/Banner';
 import { RcButton } from '@components/RcButton';
 import { workspaceProxyUrl, workspaceServing } from '../api';
+import { templateById } from '../templates';
 
 // How often to look again while nothing is answering. The same beat as the terminal's wait for
 // a pod, for the same reason: a workspace that was just started is measured in seconds.
@@ -56,8 +57,13 @@ export default {
       return this.service?.port;
     },
 
+    /** http or https, from the template: the proxy takes the scheme as part of its path. */
+    scheme() {
+      return templateById(this.workspace.template)?.scheme || 'http';
+    },
+
     url() {
-      return this.port ? workspaceProxyUrl(this.workspace.name, this.port) : '';
+      return this.port ? workspaceProxyUrl(this.workspace.name, this.port, this.scheme) : '';
     },
 
     /** Why there is nothing to frame, or '' when there is. */
@@ -101,7 +107,7 @@ export default {
         return;
       }
 
-      const serving = await workspaceServing(this.workspace.name, this.port);
+      const serving = await workspaceServing(this.workspace.name, this.port, this.scheme);
 
       if (this.unmounted) {
         return;

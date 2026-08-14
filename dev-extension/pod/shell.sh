@@ -56,6 +56,16 @@ if [ ! -f "$WORKDIR/CLAUDE.md" ] && [ -f /seed/session-claude.md ]; then
   fi
 fi
 
+# The shared login, before anything that would use it. Run as the node user and
+# with the pane's HOME, because it writes into that user's ~/.claude and a
+# root-owned credentials file is one claude cannot then refresh.
+if [ "$(id -u)" = 0 ]; then
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env "HOME=$HOME_DIR" node /seed/claude-credentials.mjs pull || true
+else
+  env "HOME=$HOME_DIR" node /seed/claude-credentials.mjs pull || true
+fi
+
 set -- tmux -f /seed/tmux.conf new-session -A -s "mc-$SESSION" -c "$WORKDIR" \
   "/bin/bash /seed/claude-session.sh"
 

@@ -44,6 +44,10 @@ export default {
 
   components: { RcButton },
 
+  // So a caller showing several of these can say which one is connected without reaching into
+  // this component's state. The conversation list uses it for the dot on each row.
+  emits: ['state'],
+
   props: {
     // Where to look for the pod, rather than which pod: a pod name changes across a stop and
     // start, and this is expected to survive that by finding the new one.
@@ -122,6 +126,10 @@ export default {
     // is dropped rather than left open behind a pane that has moved on.
     namespace() {
       this.reconnect();
+    },
+
+    state(state) {
+      this.$emit('state', state);
     },
   },
 

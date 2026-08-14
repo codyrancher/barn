@@ -20,6 +20,7 @@ import {
   listWorkspacePorts, addWorkspacePort, removeWorkspacePort, portError,
   workspaceProxyUrl, workspaceServing
 } from '../api';
+import { templateById } from '../templates';
 
 export default {
   name: 'WorkspacePorts',
@@ -97,15 +98,25 @@ export default {
     // between answering and not every three seconds is harder to read than one that is right
     // when you look at it.
     async checkServing() {
+      const template = templateById(this.workspace.template);
       const answers = await Promise.all(
-        this.ports.map((entry) => workspaceServing(this.workspace.name, entry.port))
+        this.ports.map((entry) => workspaceServing(
+          this.workspace.name,
+          entry.port,
+          entry.port === template?.port ? template?.scheme : 'http'
+        ))
       );
 
       this.serving = Object.fromEntries(this.ports.map((entry, i) => [entry.port, answers[i]]));
     },
 
     url(port) {
-      return workspaceProxyUrl(this.workspace.name, port);
+      // The template's port speaks the template's scheme; a port added by hand is http until
+      // there is a reason to ask which.
+      const template = templateById(this.workspace.template);
+      const scheme = port === template?.port ? template?.scheme : 'http';
+
+      return workspaceProxyUrl(this.workspace.name, port, scheme);
     },
 
     /** The address as somebody else would have to type it, which is what goes on the clipboard. */

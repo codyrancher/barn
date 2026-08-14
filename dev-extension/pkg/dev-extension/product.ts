@@ -1,9 +1,9 @@
 import { IPlugin } from '@shell/core/types';
+import { ensureDevRbac } from './api';
 import {
   PRODUCT_NAME, CUSTOM_PAGE_NAME, BLANK_CLUSTER, HOME_ROUTE,
   EXPLORER_PRODUCT, FLOOF_PAGE, FLOOF_ROUTE,
-  DEV_PRODUCT, WORKSPACES_PAGE, TEMPLATES_PAGE, TERMINAL_PAGE, MY_WORK_PAGE, SETTINGS_PAGE,
-  WORKSPACES_ROUTE, TEMPLATES_ROUTE, TERMINAL_ROUTE, MY_WORK_ROUTE, SETTINGS_ROUTE
+  DEV_PRODUCT, WORKSPACES_ROUTE
 } from './config/constants';
 
 // `store` is the raw Vuex store the extension manager hands to every product init, and
@@ -49,15 +49,20 @@ export function init($plugin: IPlugin, store: any) {
   // resource group, matching how the shell registers its own non-resource pages.
   const explorer = $plugin.DSL(store, EXPLORER_PRODUCT);
 
+  // `group`, `icon` and `exact` are all honoured by the nav at runtime and are what the shell's
+  // own pages set, but ConfigureVirtualTypeOptions declares none of them. Spread rather than
+  // written into the literal, because an excess property is an error where a spread of one is
+  // not, and the production build that `hmr: off` needs treats it as an error. Same reason as
+  // `public` above.
+  const navOnly = { group: 'Root', icon: 'folder', exact: true } as Record<string, unknown>;
+
   explorer.virtualType({
     name:       FLOOF_PAGE,
     label:      'Floof',
-    group:      'Root',
-    icon:       'folder',
     namespaced: false,
     weight:     99,
     route:      { name: FLOOF_ROUTE },
-    exact:      true
+    ...navOnly
   });
 
   explorer.basicType([FLOOF_PAGE], 'Root');
@@ -72,10 +77,10 @@ export function init($plugin: IPlugin, store: any) {
  * unrelated products. It owns no cluster, so it takes BLANK_CLUSTER and hides the cluster
  * switcher, exactly as the demo product above does.
  *
- * The nav entries are virtualTypes: they are pages, not resource types, so there is no schema
- * for the shell to build a list route from and the route is given outright. `basicType` is
- * what puts them in the side nav at all; a virtualType registered and never named in a
- * basicType is registered and invisible, which is the usual way this goes wrong.
+ * It registers no nav entries, because it does not use Rancher's nav: its pages are children of
+ * a page template of their own which draws the sidebar (see routing/index.ts). The `product()`
+ * call still matters, since that is what puts Dev in the product switcher and tells the header
+ * whose page this is.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function devProduct($plugin: IPlugin, store: any) {
@@ -97,65 +102,12 @@ function devProduct($plugin: IPlugin, store: any) {
 
   product(devOpts);
 
-  virtualType({
-    name:  WORKSPACES_PAGE,
-    label: 'Workspaces',
-    icon:  'folder',
-    route: {
-      name:   WORKSPACES_ROUTE,
-      params: { product: DEV_PRODUCT, cluster: BLANK_CLUSTER }
-    },
-    weight: 100
-  });
+  // No virtualTypes and no basicTypes for this product: its navigation is its own sidebar
+  // (see components/DevSidebar.vue and pages/DevShell.vue), and registering entries that
+  // nothing renders would leave two descriptions of the same list.
 
-  // The harness's own top-level routes, in its own order: what am I doing (My Work), the
-  // things I am doing it in (Workspaces), the terminal that belongs to none of them, and the
-  // two pages that describe the tooling. Keeping the nav the same shape as the harness's is
-  // the point of the layout, so an entry exists here even where the page behind it is still
-  // being built, and each such page says so rather than showing something invented.
-  virtualType({
-    name:  TERMINAL_PAGE,
-    label: 'Terminal',
-    icon:  'terminal',
-    route: {
-      name:   TERMINAL_ROUTE,
-      params: { product: DEV_PRODUCT, cluster: BLANK_CLUSTER }
-    },
-    weight: 99
-  });
-
-  virtualType({
-    name:  MY_WORK_PAGE,
-    label: 'My Work',
-    icon:  'user',
-    route: {
-      name:   MY_WORK_ROUTE,
-      params: { product: DEV_PRODUCT, cluster: BLANK_CLUSTER }
-    },
-    weight: 98
-  });
-
-  virtualType({
-    name:  TEMPLATES_PAGE,
-    label: 'Templates',
-    icon:  'file',
-    route: {
-      name:   TEMPLATES_ROUTE,
-      params: { product: DEV_PRODUCT, cluster: BLANK_CLUSTER }
-    },
-    weight: 97
-  });
-
-  virtualType({
-    name:  SETTINGS_PAGE,
-    label: 'Settings',
-    icon:  'gear',
-    route: {
-      name:   SETTINGS_ROUTE,
-      params: { product: DEV_PRODUCT, cluster: BLANK_CLUSTER }
-    },
-    weight: 96
-  });
-
-  basicType([WORKSPACES_PAGE, TERMINAL_PAGE, MY_WORK_PAGE, TEMPLATES_PAGE, SETTINGS_PAGE]);
+  // The identities the terminals run as, and the namespace holding the credentials they share.
+  // Create-if-missing, so a cluster that already has them keeps what it has, and quiet, for the
+  // same reason the fetch above is: this runs for every user on every load.
+  ensureDevRbac().catch(() => {});
 }
