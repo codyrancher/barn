@@ -16,9 +16,9 @@
 // at all. Plain brings the top-level menu, which is the way out; its header bar is hidden
 // here (see the unscoped style block at the bottom) because each pane labels itself.
 import { RcIcon } from '@components/RcIcon';
-import { RcButton } from '@components/RcButton';
 import PodTerminal from '../components/PodTerminal.vue';
 import ExtensionSelect from '../components/ExtensionSelect.vue';
+import ClaudeMark from '../components/ClaudeMark.vue';
 import AgentFilesModal from '../components/AgentFilesModal.vue';
 import {
   ensureExtension, extensionReady, extensionUrl, DEFAULT_EXTENSION
@@ -65,7 +65,7 @@ export default {
   name: 'BarnEditor',
 
   components: {
-    RcIcon, RcButton, PodTerminal, ExtensionSelect, AgentFilesModal
+    RcIcon, PodTerminal, ExtensionSelect, AgentFilesModal, ClaudeMark
   },
 
   data() {
@@ -232,29 +232,25 @@ export default {
         class="mc-editor__bar"
         :style="{ width: `calc(${ split }% - 4px)` }"
       >
-        <RcButton
-          variant="link"
-          size="small"
+        <button
+          type="button"
+          class="mc-editor__icon-button"
           data-testid="barn-agent-files-button"
+          title="Agent files"
+          aria-label="Agent files"
           @click="showAgentFiles = true"
         >
-          Agent files
-        </RcButton>
+          <ClaudeMark :size="16" />
+        </button>
       </div>
       <div class="mc-editor__bar-gap" />
       <div class="mc-editor__bar mc-editor__bar--right">
         <ExtensionSelect
+          class="mc-editor__bar-select"
           :value="extension"
           @open="openExtension"
           @create="createExtension"
         />
-        <a
-          v-if="rightUrl"
-          class="mc-editor__bar-link"
-          :href="rightUrl"
-          target="_blank"
-          rel="noopener"
-        >Open in a tab</a>
       </div>
     </div>
     <div
@@ -352,9 +348,20 @@ $divider-width: 8px;
     }
   }
 
-  // The divider's width, so the two bars break where the panes do.
+  // The divider's width, so the two bars break where the panes do - and the divider's line,
+  // so it runs from the top of the bars to the bottom of the page in one stroke. Two bars
+  // separated by a gap read as one bar with a space in it; the line is what makes the sides
+  // look like sides.
   &__bar-gap {
-    flex: 0 0 $divider-width;
+    flex:            0 0 $divider-width;
+    display:         flex;
+    justify-content: center;
+
+    &::after {
+      content:    '';
+      width:      1px;
+      background: var(--border, #dcdee7);
+    }
   }
 
   &__bar-name {
@@ -367,8 +374,35 @@ $divider-width: 8px;
     color: var(--muted, #6c6c76);
   }
 
-  &__bar-link {
+  // Hard against the right edge, where the link to a new tab used to be. The bar is otherwise
+  // empty, so this is the whole of it.
+  &__bar-select {
     margin-left: auto;
+  }
+
+  // A square with a rounded border, sized so it is the same height as the select across the
+  // gap rather than the height of the glyph inside it.
+  &__icon-button {
+    display:         inline-flex;
+    align-items:     center;
+    justify-content: center;
+    width:           24px;
+    height:          24px;
+    padding:         0;
+    border:          1px solid var(--border, #dcdee7);
+    border-radius:   var(--border-radius);
+    background:      none;
+    cursor:          pointer;
+    line-height:     0;
+
+    &:hover {
+      background:   var(--accent-btn);
+      border-color: var(--primary);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--primary);
+    }
   }
 
   &__panes {

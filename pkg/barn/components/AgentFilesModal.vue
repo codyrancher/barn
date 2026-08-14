@@ -16,13 +16,79 @@ import AsyncButton from '@shell/components/AsyncButton';
 import { Card } from '@components/Card';
 import { RcButton } from '@components/RcButton';
 import { Banner } from '@components/Banner';
+import AgentFileTree from './AgentFileTree.vue';
 import { listAgentFiles, readAgentFile, writeAgentFile } from '../extensions';
+
+/**
+ * The paths, as a tree.
+ *
+ * Built here rather than asked for, because `find` returns a flat list and a flat list of four
+ * files called CLAUDE.md is four identical rows. Every node is a directory holding directories
+ * and files, which is the only shape the recursive component below needs.
+ */
+function buildTree(paths) {
+  const root = {
+    name: '', path: '', dirs: [], files: []
+  };
+
+  for (const path of paths) {
+    const parts = path.split('/').filter(Boolean);
+    const fileName = parts.pop();
+    let node = root;
+    let walked = '';
+
+    for (const part of parts) {
+      walked += `/${ part }`;
+
+      let next = node.dirs.find((dir) => dir.name === part);
+
+      if (!next) {
+        next = {
+          name: part, path: walked, dirs: [], files: []
+        };
+        node.dirs.push(next);
+      }
+
+      node = next;
+    }
+
+    node.files.push({ name: fileName, path });
+  }
+
+  return root;
+}
+
+/**
+ * Fold a directory that only ever contains one directory into its parent.
+ *
+ * `.home/.claude` rather than `.home` holding `.claude` holding one file. It is what a pull
+ * request's file list does and it is worth the few lines: without it half the rows in this tree
+ * are directories nobody branched at, and the files are four indents deep for no reason.
+ */
+function collapse(node) {
+  for (const dir of node.dirs) {
+    collapse(dir);
+  }
+
+  for (const dir of node.dirs) {
+    while (dir.dirs.length === 1 && !dir.files.length) {
+      const only = dir.dirs[0];
+
+      dir.name = `${ dir.name }/${ only.name }`;
+      dir.path = only.path;
+      dir.files = only.files;
+      dir.dirs = only.dirs;
+    }
+  }
+
+  return node;
+}
 
 export default {
   name: 'AgentFilesModal',
 
   components: {
-    AppModal, AsyncButton, Card, RcButton, Banner
+    AppModal, AsyncButton, Card, RcButton, Banner, AgentFileTree
   },
 
   props: {
@@ -53,25 +119,22 @@ export default {
     },
 
     /**
-     * The list, grouped by the directory each file is in.
+     * The tree, rooted at the deepest directory every one of these files is under.
      *
-     * Grouped rather than flat because the same filename appears in several places - three
-     * CLAUDE.md files is normal - and a flat list of them is three identical rows.
+     * Everything is inside `/app`, so showing it would be one row of indent that says nothing.
+     * The prefix is not thrown away though - it goes above the tree, because these are paths in
+     * a pod and where they are is part of what they are.
      */
-    groups() {
-      const byDirectory = new Map();
+    tree() {
+      let node = collapse(buildTree(this.files));
 
-      for (const path of this.files) {
-        const directory = path.slice(0, path.lastIndexOf('/')) || '/';
-
-        if (!byDirectory.has(directory)) {
-          byDirectory.set(directory, []);
-        }
-
-        byDirectory.get(directory).push(path);
+      // Walk down through the single-child directories at the top; where that stops is the
+      // deepest directory every one of these files is under.
+      while (node.dirs.length === 1 && !node.files.length) {
+        node = node.dirs[0];
       }
 
-      return [...byDirectory.entries()].map(([directory, paths]) => ({ directory, paths }));
+      return { prefix: node.path || '/', dirs: node.dirs, files: node.files };
     },
   },
 
@@ -112,11 +175,6 @@ export default {
         this.error = e.message || String(e);
         done(false);
       }
-    },
-
-    // The last segment, which is what distinguishes rows inside one directory group.
-    basename(path) {
-      return path.slice(path.lastIndexOf('/') + 1);
     },
   },
 };
@@ -170,25 +228,26 @@ export default {
           class="agent-files__panes"
         >
           <nav class="agent-files__list">
-            <div
-              v-for="group in groups"
-              :key="group.directory"
-              class="agent-files__group"
-            >
-              <div class="agent-files__dir">
-                {{ group.directory }}
-              </div>
-              <button
-                v-for="path in group.paths"
-                :key="path"
-                type="button"
-                class="agent-files__file"
-                :class="{ 'agent-files__file--current': path === selected }"
-                @click="open(path)"
-              >
-                {{ basename(path) }}
-              </button>
+            <div class="agent-files__root">
+              {{ tree.prefix }}
             </div>
+            <AgentFileTree
+              v-for="dir in tree.dirs"
+              :key="dir.path"
+              :node="dir"
+              :current="selected"
+              @select="open"
+            />
+            <button
+              v-for="file in tree.files"
+              :key="file.path"
+              type="button"
+              class="agent-files__loose"
+              :class="{ 'agent-files__loose--current': file.path === selected }"
+              @click="open(file.path)"
+            >
+              {{ file.name }}
+            </button>
           </nav>
 
           <div class="agent-files__editor">
@@ -247,36 +306,41 @@ export default {
     padding: 5px;
   }
 
-  &__group {
-    margin-bottom: 10px;
-  }
-
-  &__dir {
-    font-size: 11px;
-    color: var(--muted);
-    padding: 4px 6px;
-    overflow: hidden;
+  // Where the tree starts, since the tree itself is relative to it.
+  &__root {
+    font-size:     11px;
+    font-family:   monospace;
+    color:         var(--muted);
+    padding:       2px 6px 6px;
+    overflow:      hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space:   nowrap;
   }
 
-  &__file {
-    display: block;
-    width: 100%;
-    text-align: left;
-    padding: 5px 6px;
-    border: none;
+  // A file directly in the root directory, which has no directory row to sit under.
+  &__loose {
+    display:       block;
+    width:         100%;
+    text-align:    left;
+    padding:       0 6px;
+    height:        22px;
+    min-height:    0;
+    border:        none;
     border-radius: var(--border-radius);
-    background: none;
-    color: var(--body-text);
-    cursor: pointer;
+    background:    none;
+    color:         var(--link);
+    font-family:   monospace;
+    font-size:     12px;
+    line-height:   22px;
+    cursor:        pointer;
 
     &:hover {
       background: var(--accent-btn);
     }
 
     &--current {
-      background: var(--accent-btn);
+      background:  var(--accent-btn);
+      color:       var(--body-text);
       font-weight: 600;
     }
   }
