@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rancher-browser
+  labels: { app: rancher-browser }
+spec:
+  replicas: {{ ternary 1 0 .Values.sidecars.rancherBrowser }}
+  selector:
+    matchLabels: { app: rancher-browser }
+  template:
+    metadata:
+      labels: { app: rancher-browser }
+    spec:
+      # Stage the cdp-proxy service + viewer-init hook from the api image into
+      # emptyDirs the chromium container mounts (the k8s twin of the compose
+      # sidecar's bind mounts).
+      initContainers:
+        - name: stage-init
+          image: {{ .Values.images.api }}
+          imagePullPolicy: Always
+          command:
+            - /bin/sh
+            - -c
+            - |
+              cp /app/sidecars/dev/rancher-browser/cdp-proxy /svc/cdp-proxy
+              cp /app/sidecars/dev/rancher-browser/viewer-init /init/viewer-init
+              chmod +x /svc/cdp-proxy /init/viewer-init
+          volumeMounts:
+            - { name: custom-services, mountPath: /svc }
+            - { name: custom-init, mountPath: /init }
+      containers:
+        - name: chromium
+          image: {{ .Values.images.rancherBrowser }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: PUID, value: "1000" }
+            - { name: PGID, value: "1000" }
+            - { name: CUSTOM_PORT, value: "3000" }
+            - { name: CHROME_CLI, value: "https://rancher --no-first-run --start-maximized --disable-infobars --allow-insecure-localhost --ignore-certificate-errors --remote-debugging-port=9222 --remote-debugging-address=0.0.0.0 --allow-running-insecure-content" }
+          ports:
+            - containerPort: 3000
+            - containerPort: 3001
+            - containerPort: 9222
+          volumeMounts:
+            - { name: custom-services, mountPath: /custom-services.d }
+            - { name: custom-init, mountPath: /custom-cont-init.d }
+      volumes:
+        - name: custom-services
+          emptyDir: {}
+        - name: custom-init
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rancher-browser
+spec:
+  selector: { app: rancher-browser }
+  ports:
+    - { name: http, port: 3000, targetPort: 3000 }
+    - { name: https, port: 3001, targetPort: 3001 }
+    - { name: cdp, port: 9222, targetPort: 9222 }

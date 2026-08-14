@@ -1,0 +1,20 @@
+{
+  "name": "dev-extension-app",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@rancher/shell": "^3.0.11"
+  },
+  "resolutions": {
+    "@types/node": "~25.3.0",
+    "@types/lodash": "4.17.5"
+  },
+  "scripts": {
+    "dev": "NODE_ENV=dev ./node_modules/.bin/vue-cli-service serve",
+    "build": "./node_modules/.bin/vue-cli-service build",
+    "clean": "./node_modules/@rancher/shell/scripts/clean"
+  }
+}
