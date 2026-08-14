@@ -52,10 +52,20 @@ fi
 #
 # As the node user: this writes into the home claude runs with, and a root-owned
 # .claude.json is one claude cannot then update.
+# HOME_DIR is passed by shell.sh, since which directory outlives the pod depends
+# on which kind of pod this is: /app for the dev server, /workspace for a
+# workspace. The default is for the background run from boot.sh, which is the
+# dev server's.
+APP_HOME=${HOME_DIR:-/app/.home}
+
+# TRUST_DIRS is the pane's own directory, passed by shell.sh, so the folder the
+# tab is about to open in is one claude already trusts rather than one it stops
+# and asks about.
 if [ "$(id -u)" = 0 ]; then
-  setpriv --reuid=1000 --regid=1000 --init-groups env HOME=/app/.home node /seed/claude-defaults.mjs
+  setpriv --reuid=1000 --regid=1000 --init-groups \
+    env "HOME=$APP_HOME" "TRUST_DIRS=${TRUST_DIRS:-}" node /seed/claude-defaults.mjs
 else
-  env HOME=/app/.home node /seed/claude-defaults.mjs
+  env "HOME=$APP_HOME" "TRUST_DIRS=${TRUST_DIRS:-}" node /seed/claude-defaults.mjs
 fi
 
 echo "[tools] ready"

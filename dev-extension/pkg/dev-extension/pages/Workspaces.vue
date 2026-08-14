@@ -10,9 +10,10 @@ import Loading from '@shell/components/Loading';
 import { Banner } from '@components/Banner';
 import { RcButton } from '@components/RcButton';
 import ConfirmDeleteWorkspace from '../components/ConfirmDeleteWorkspace.vue';
-import { listWorkspaces, setWorkspaceRunning } from '../api';
+import { listAllWorkspaces, setWorkspaceRunning } from '../api';
+import { lastWorkspace, lastTab } from '../recent';
 import {
-  DEV_PRODUCT, BLANK_CLUSTER, WORKSPACE_ROUTE, CREATE_ROUTE
+  DEV_PRODUCT, BLANK_CLUSTER, WORKSPACE_ROUTE, CREATE_ROUTE, DEFAULT_WORKSPACE_TAB
 } from '../config/constants';
 
 // How often the list re-reads the cluster. Workspaces change state without anything on this
@@ -28,7 +29,32 @@ export default {
   },
 
   async fetch() {
-    this.rows = await listWorkspaces();
+    this.rows = await listAllWorkspaces();
+
+    // Straight through to a workspace. This page is the product's landing route, so pressing Dev
+    // in Rancher's rail arrives here, and what somebody wants on arriving is a workspace rather
+    // than a list of them: the one they were in, or failing that the first one there is.
+    //
+    // Which leaves this list on screen in exactly one case, which is the one it is useful in:
+    // there are no workspaces yet, and what it shows is how to make one.
+    //
+    // `replace` rather than `push`, so Back goes where it went before rather than bouncing off
+    // this page and being redirected again.
+    // Unless it was asked for. The redirect makes the landing route useful and would otherwise
+    // make this page unreachable, and it is the only place a workspace can be stopped: a
+    // crash-looping one is exactly when somebody needs it. The sidebar's template heading links
+    // here with this, which is the way back in.
+    const asked = this.$route.query.all !== undefined;
+    const last = lastWorkspace();
+    const going = asked ? null : (this.rows.find((row) => row.name === last) || this.rows[0]);
+
+    if (going) {
+      this.$router.replace({
+        name:   WORKSPACE_ROUTE,
+        params: { product: DEV_PRODUCT, cluster: BLANK_CLUSTER, workspace: going.name },
+        hash:   `#${ lastTab() || DEFAULT_WORKSPACE_TAB }`,
+      });
+    }
   },
 
   data() {
@@ -99,7 +125,7 @@ export default {
     // would be worse than showing the previous rows for another five seconds.
     async refresh() {
       try {
-        this.rows = await listWorkspaces();
+        this.rows = await listAllWorkspaces();
       } catch { /* the next poll will say if it is more than a blip */ }
     },
 

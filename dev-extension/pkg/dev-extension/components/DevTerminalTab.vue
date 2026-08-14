@@ -10,14 +10,22 @@
 // use, so the strip along the bottom is in the place and the styling someone already expects
 // per-tab controls to be in.
 import Window from '@shell/components/Window/Window';
-import { RcButton } from '@components/RcButton';
 import DevTerminal from './DevTerminal.vue';
 import { openTerminal } from '../terminals';
+
+/**
+ * The window manager's own tab strip, by the id the shell gives its bottom panel.
+ *
+ * Not `.tabs` on its own: that class is Rancher's for every tabbed thing on the page, including
+ * the workspace's own tab strip, and a teleport to it would land the plus wherever the first one
+ * happened to be.
+ */
+const STRIP = '#horizontal-window-manager .tabs';
 
 export default {
   name: 'DevTerminalTab',
 
-  components: { Window, RcButton, DevTerminal },
+  components: { Window, DevTerminal },
 
   props: {
     // The window manager's own description of this tab.
@@ -69,13 +77,60 @@ export default {
     },
   },
 
+  data() {
+    return {
+      // The teleport's target, in data so the template can name it.
+      STRIP,
+      stripTimer: null,
+      // Whether the tab strip is on the page yet. The teleport below needs its target to exist
+      // when it renders, and this component is itself teleported into the panel, so the first
+      // render can happen before the strip is there.
+      striped: false,
+    };
+  },
+
+  watch: {
+    // A tab becoming the active one is the other moment the strip can appear, and the first tab
+    // in a fresh drawer is mounted before the panel around it exists.
+    active() {
+      this.findStrip();
+    },
+  },
+
+  mounted() {
+    this.findStrip();
+  },
+
+  beforeUnmount() {
+    clearTimeout(this.stripTimer);
+  },
+
   methods: {
     /**
-     * Add another terminal, from inside the drawer.
+     * Wait for the tab strip to exist, then let the teleport render into it.
      *
-     * The harness has a plus at the end of its tab strip. The window manager's strip is the
-     * shell's and has no slot to put one in, so the nearest thing that is still one click from
-     * the drawer is here, in the row Rancher already uses for a tab's own controls.
+     * This component is itself teleported into the panel, and on the first terminal of a session
+     * that happens as the panel is being built: a single nextTick is sometimes too early, and a
+     * teleport whose target is missing renders nothing and does not try again. So it looks a few
+     * times and then stops, which is the difference between a plus that appears and one that
+     * appears only on the second terminal.
+     */
+    findStrip(attempt = 0) {
+      clearTimeout(this.stripTimer);
+      this.striped = !!document.querySelector(STRIP);
+
+      if (!this.striped && attempt < 10) {
+        this.stripTimer = setTimeout(() => this.findStrip(attempt + 1), 100);
+      }
+    },
+
+    /**
+     * Add another terminal, from the end of the tab strip.
+     *
+     * Where the harness puts it, and where a plus belongs: beside the things it makes another of.
+     * The window manager's strip is the shell's own and has no slot, so this is a teleport into
+     * it rather than a component the shell renders. Only the active tab draws one, or there would
+     * be a plus per terminal stacked on top of each other.
      */
     newTerminal() {
       openTerminal(this.$store);
@@ -92,17 +147,28 @@ export default {
           Terminal {{ number }}, session <code>{{ session }}</code> in the dev server's pod.
           Closing this tab leaves it running.
         </span>
-        <RcButton
-          variant="link"
-          size="small"
-          left-icon="plus"
-          @click="newTerminal"
-        >
-          New terminal
-        </RcButton>
       </div>
     </template>
     <template #body>
+      <!--
+        The plus, at the end of the strip the tabs are in. Inside the body slot rather than beside
+        it: Window renders the slots it names and nothing else, so a teleport sitting as a bare
+        child of it is never rendered at all and the plus never appears. See newTerminal.
+      -->
+      <Teleport
+        v-if="active && striped"
+        :to="STRIP"
+      >
+        <button
+          v-clean-tooltip="'New terminal'"
+          type="button"
+          class="dev-terminal-tab__new"
+          aria-label="New terminal"
+          @click="newTerminal"
+        >
+          <i class="icon icon-plus" />
+        </button>
+      </Teleport>
       <DevTerminal
         class="dev-terminal-tab__terminal"
         :namespace="namespace"
@@ -114,7 +180,27 @@ export default {
   </Window>
 </template>
 
-<style lang="scss" scoped>
+<style lang="scss">
+  // Not scoped to the component's own tree: the plus is teleported into the shell's tab strip,
+  // which is outside it, so a scoped rule would not reach it.
+  .dev-terminal-tab__new {
+    display:         flex;
+    align-items:     center;
+    justify-content: center;
+    width:           28px;
+    min-height:      0;
+    margin:          0;
+    padding:         0;
+    border:          none;
+    background:      transparent;
+    color:           var(--body-text);
+    cursor:          pointer;
+
+    &:hover {
+      color: var(--primary);
+    }
+  }
+
   .dev-terminal-tab {
     &__bar {
       display:     flex;

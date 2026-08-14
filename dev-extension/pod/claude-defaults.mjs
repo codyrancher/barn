@@ -19,9 +19,12 @@ const HOME = process.env.HOME || '/app/.home';
 const CONFIG = path.join(HOME, '.claude.json');
 const SETTINGS = path.join(HOME, '.claude', 'settings.json');
 
-// Directories a terminal is likely to start claude in: the extension source
-// (where the pane opens) and the app around it.
-const TRUSTED = ['/app/pkg/dev-extension', '/app'];
+// The directories a pane may start claude in, which is not the same list in
+// every pod: the dev server's tabs land in its own tree, and a workspace's land
+// in the checkout it cloned. shell.sh passes the pane's own directory; the
+// default is the dev server pod's source and the app around it, which is what
+// boot.sh's background run has no directory to pass.
+const TRUSTED = (process.env.TRUST_DIRS || '/app/pkg/dev-extension:/app').split(':').filter(Boolean);
 
 function read(file) {
   try {

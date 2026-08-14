@@ -16,15 +16,149 @@
  * is no controller and no credential anywhere in here.
  */
 import {
-  templateById, DevTemplate, DevSidecar, GLOBAL_SECRETS
+  templateById, TEMPLATES, DevTemplate, DevSidecar, GLOBAL_SECRETS, WORKSPACE_WORKDIR, WORKSPACE_HOME,
+  WORKSPACE_QUEUE
 } from './templates';
 import { MANAGER_RULES } from './rancher-sidecar';
+import {
+  DevShare, shareName, nginxConf, htpasswd, sharePodSpec
+} from './share';
 import { WORKSPACE_VUE_CONFIG, WORKSPACE_CONFIG_MOUNT } from './workspace-config';
+import { INSIGHTS_SERVER } from './insights-server';
+import { WORKSPACE_API_SERVER } from './workspace-api';
+import { DevPrompt, DEFAULT_PROMPTS } from './prompts';
+import { BROWSER_EXTENSION_FILES } from './browser-extension';
 
 // The `local` cluster, like the pod this dev server runs in. The product shows no cluster
 // switcher, so there is nothing that could make this a choice.
-const CLUSTER = 'local';
-const BASE = `/k8s/clusters/${ CLUSTER }`;
+/**
+ * The cluster every call below is about.
+ *
+ * A workspace can be hosted on any cluster this Rancher manages, not only the one Rancher runs
+ * in, so this is a variable rather than a constant. It is read at call time by the eighty-odd
+ * template strings that build a URL, which is why setting it is enough and none of them takes a
+ * cluster of its own.
+ *
+ * One at a time, deliberately. A page is about one workspace, and a workspace is in one cluster,
+ * so opening one sets this before it asks anything else and every request that follows agrees.
+ * The one thing that is genuinely about several clusters is listing workspaces, and that takes
+ * its cluster explicitly (see listWorkspaces) rather than moving this under its own feet.
+ */
+const DEFAULT_CLUSTER = 'local';
+
+let currentCluster = DEFAULT_CLUSTER;
+let BASE = clusterBase(DEFAULT_CLUSTER);
+
+export function clusterBase(cluster: string): string {
+  return `/k8s/clusters/${ cluster }`;
+}
+
+/** Point every call that follows at a cluster. Called when a workspace is opened. */
+export function setCluster(cluster: string): void {
+  currentCluster = cluster || DEFAULT_CLUSTER;
+  BASE = clusterBase(currentCluster);
+}
+
+export function activeCluster(): string {
+  return currentCluster;
+}
+
+/** The label a workspace's namespace carries, so its cluster survives a page reload. */
+export const LABEL_CLUSTER = 'dev.rancher.io/cluster';
+
+/** One cluster this Rancher manages, with enough of its capacity to choose between them. */
+export interface DevCluster {
+  id: string;
+  name: string;
+  state: string;
+  /** Bytes not asked for by anything, or 0 where the cluster does not say. */
+  memoryFree: number;
+  diskFree: number;
+}
+
+/**
+ * Kubernetes quantities as a number of bytes.
+ *
+ * They arrive as `65166836Ki`, `518Mi` or a bare `466047163641`, and the difference between the
+ * three is a suffix rather than a scale anyone would guess. Binary units, which is what the
+ * suffix means: Ki is 1024, not 1000.
+ */
+function bytes(quantity: string): number {
+  const match = /^(\d+(?:\.\d+)?)([KMGTP]i?)?$/.exec(String(quantity || '').trim());
+
+  if (!match) {
+    return 0;
+  }
+
+  const scale: Record<string, number> = {
+    Ki: 1024, Mi: 1024 ** 2, Gi: 1024 ** 3, Ti: 1024 ** 4, Pi: 1024 ** 5,
+    K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15,
+  };
+
+  return Number(match[1]) * (scale[match[2] || ''] || 1);
+}
+
+/**
+ * The clusters a workspace could be hosted on, with what is left on each.
+ *
+ * Memory comes from Rancher's own view of a cluster, which knows both what its nodes can offer
+ * and what the pods already on it have asked for. Disk does not: Rancher does not carry
+ * ephemeral storage at the cluster level, so the nodes are asked, and what is reported is what
+ * they can allocate rather than what is unclaimed - almost nothing requests ephemeral storage,
+ * so the two are the same number in practice and the difference is worth knowing about.
+ *
+ * A cluster that cannot be reached is still offered, with no numbers beside it. It is a cluster
+ * somebody may still want, and refusing to list it would be this page deciding that for them.
+ */
+export async function listClusters(): Promise<DevCluster[]> {
+  const response = await devFetch('/v3/clusters').catch(() => null);
+  const clusters = (response?.data || []).filter((cluster: Json) => cluster.state === 'active');
+
+  return Promise.all(clusters.map(async(cluster: Json) => {
+    const memoryFree = Math.max(0, bytes(cluster.allocatable?.memory) - bytes(cluster.requested?.memory));
+    const [nodes, pods] = await Promise.all([
+      devFetch(`${ clusterBase(cluster.id) }/v1/nodes`).catch(() => null),
+      devFetch(`${ clusterBase(cluster.id) }/v1/pods`).catch(() => null),
+    ]);
+
+    const allocatable = (nodes?.data || [])
+      .reduce((total: number, node: Json) => total + bytes(node.status?.allocatable?.['ephemeral-storage']), 0);
+
+    // What the pods on it have asked for, summed here because Rancher's own `requested` carries
+    // cpu, memory and pods and not this. Almost nothing requests ephemeral storage, so this is
+    // usually nothing at all - but a cluster where something does would otherwise be offered as
+    // having room it has already given away.
+    const requested = (pods?.data || [])
+      .flatMap((pod: Json) => pod.spec?.containers || [])
+      .reduce((total: number, container: Json) => total + bytes(container.resources?.requests?.['ephemeral-storage']), 0);
+
+    return {
+      id:    cluster.id,
+      name:  cluster.name || cluster.id,
+      state: cluster.state,
+      memoryFree,
+      diskFree: Math.max(0, allocatable - requested),
+    };
+  }));
+}
+
+/** A byte count as a person reads it, which is one number and one unit. */
+export function readableBytes(value: number): string {
+  if (!value) {
+    return 'unknown';
+  }
+
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let scaled = value;
+  let unit = 0;
+
+  while (scaled >= 1024 && unit < units.length - 1) {
+    scaled /= 1024;
+    unit += 1;
+  }
+
+  return `${ scaled >= 10 || unit === 0 ? Math.round(scaled) : scaled.toFixed(1) } ${ units[unit] }`;
+}
 
 /** Everything a workspace owns carries these, and the list is built by filtering on them. */
 export const LABEL_WORKSPACE = 'dev.rancher.io/workspace';
@@ -65,6 +199,8 @@ const MAX_NAME_LENGTH = 40;
 export type WorkspaceState = 'running' | 'stopped' | 'starting' | 'creating' | 'removing' | 'error';
 
 export interface DevWorkspace {
+  /** The cluster it is hosted on, from its namespace's label. See LABEL_CLUSTER. */
+  cluster: string;
   name: string;
   namespace: string;
   /** The template id. Kept even when it names a template that no longer exists. */
@@ -280,13 +416,16 @@ function stateOf(namespace: Json, deployment: Json | undefined, pod?: Json): Wor
  * One function for both readers, so the list and the detail page cannot come to describe the
  * same workspace differently while fetching it two different ways.
  */
-function workspaceFrom(namespace: Json, deployment: Json | undefined, pod?: Json): DevWorkspace {
+function workspaceFrom(namespace: Json, deployment: Json | undefined, pod?: Json, cluster?: string): DevWorkspace {
   const name = namespace.metadata.labels[LABEL_WORKSPACE];
   const template = namespace.metadata.labels[LABEL_TEMPLATE] || '';
 
   return {
     name,
     namespace:     namespace.metadata.name,
+    // The label where there is one, and the cluster it was read from otherwise: a workspace made
+    // before this product could host them anywhere is in the cluster it is being listed from.
+    cluster:       namespace.metadata.labels[LABEL_CLUSTER] || cluster || activeCluster(),
     template,
     templateLabel: templateById(template)?.label || template || 'Unknown',
     state:         stateOf(namespace, deployment, pod),
@@ -327,13 +466,17 @@ function ownedByWorkspace(candidate: Json, name: string): boolean {
  * (see WORKSPACE_FILTER) and filtered again below, which is a saving on a cluster of any size
  * and no change to what this returns.
  */
-export async function listWorkspaces(): Promise<DevWorkspace[]> {
+export async function listWorkspaces(cluster?: string): Promise<DevWorkspace[]> {
+  // Explicit rather than through BASE, because this is the one thing in the product that asks
+  // about a cluster other than the one being looked at: see listAllWorkspaces, which calls it
+  // once per cluster and must not move BASE under whatever else is in flight.
+  const from = clusterBase(cluster || activeCluster());
   const [namespaces, deployments, pods] = await Promise.all([
-    devFetch(`${ BASE }/v1/namespaces?${ WORKSPACE_FILTER }`),
-    devFetch(`${ BASE }/v1/apps.deployments?${ WORKSPACE_FILTER }`),
+    devFetch(`${ from }/v1/namespaces?${ WORKSPACE_FILTER }`),
+    devFetch(`${ from }/v1/apps.deployments?${ WORKSPACE_FILTER }`),
     // The third collection is what turns "Starting" into which part of starting. One request
     // for every workspace's pod, not one per workspace, so the list costs the same as it did.
-    devFetch(`${ BASE }/v1/pods?${ WORKSPACE_FILTER }`).catch(() => null),
+    devFetch(`${ from }/v1/pods?${ WORKSPACE_FILTER }`).catch(() => null),
   ]);
 
   const byWorkspace = new Map<string, Json>();
@@ -360,9 +503,27 @@ export async function listWorkspaces(): Promise<DevWorkspace[]> {
     .map((namespace: Json) => {
       const name = namespace.metadata.labels[LABEL_WORKSPACE];
 
-      return workspaceFrom(namespace, byWorkspace.get(name), podByWorkspace.get(name));
+      return workspaceFrom(namespace, byWorkspace.get(name), podByWorkspace.get(name), cluster);
     })
     .sort((a: DevWorkspace, b: DevWorkspace) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Every workspace this person has, on every cluster.
+ *
+ * What the sidebar shows, because a workspace is a person's rather than a cluster's: somebody
+ * with one on each of two clusters wants one list. A cluster that cannot be read contributes
+ * nothing rather than taking the list down with it, which is the ordinary case for somebody with
+ * access to one cluster out of several.
+ */
+export async function listAllWorkspaces(): Promise<DevWorkspace[]> {
+  const clusters = await listClusters().catch(() => []);
+  const lists = await Promise.all(
+    (clusters.length ? clusters.map((cluster) => cluster.id) : [activeCluster()])
+      .map((id) => listWorkspaces(id).catch(() => [] as DevWorkspace[])),
+  );
+
+  return lists.flat().sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /**
@@ -461,6 +622,10 @@ function deploymentBody(name: string, template: DevTemplate): Json {
               // Read-only, and copied rather than mounted over the checkout: a workspace is an
               // ordinary clone someone can edit, and a file mounted into it could not be.
               { name: 'dev-config', mountPath: WORKSPACE_CONFIG_MOUNT, readOnly: true },
+              // What a terminal tab runs. Mounted rather than copied, and read straight out of
+              // the mount, so a workspace always starts the scripts the extension last wrote
+              // without needing a pod restart to pick them up.
+              { name: 'terminal', mountPath: WORKSPACE_TERMINAL_MOUNT, readOnly: true },
             ],
             // A first boot is a clone, an install and a compile, which is minutes. A startup
             // probe with a long budget is what stops the kubelet killing a pod that is working,
@@ -484,6 +649,11 @@ function deploymentBody(name: string, template: DevTemplate): Json {
               hostPath: { path: `${ template.hostPath }/${ name }`, type: 'DirectoryOrCreate' },
             }] : []),
             { name: 'dev-config', configMap: { name: WORKSPACE_CONFIG_MAP } },
+            // Executable: these are scripts run out of the mount, and a ConfigMap's default
+            // mode is 0644, which is a terminal that opens on "permission denied".
+            {
+              name: 'terminal', configMap: { name: WORKSPACE_TERMINAL_MAP, defaultMode: 0o555, optional: true }
+            },
           ],
         },
       },
@@ -535,7 +705,14 @@ async function workspaceNameConflict(name: string): Promise<string> {
  * the workspace as Creating, and deleting it is one click. Tearing down half a workspace on
  * the user's behalf would be a guess about which half they wanted.
  */
-export async function createWorkspace(name: string, templateId: string): Promise<void> {
+export async function createWorkspace(name: string, templateId: string, cluster?: string): Promise<void> {
+  // Everything below builds a URL from BASE, so the cluster is chosen once here rather than
+  // threaded through a dozen calls. It stays set afterwards, which is what the page wants: it
+  // navigates to the workspace it just made.
+  if (cluster) {
+    setCluster(cluster);
+  }
+
   const template = templateById(templateId);
 
   if (!template) {
@@ -552,7 +729,9 @@ export async function createWorkspace(name: string, templateId: string): Promise
   }
 
   const namespace = workspaceNamespace(name);
-  const labels = { [LABEL_WORKSPACE]: name, [LABEL_TEMPLATE]: template.id };
+  const labels = {
+    [LABEL_WORKSPACE]: name, [LABEL_TEMPLATE]: template.id, [LABEL_CLUSTER]: activeCluster(),
+  };
 
   await devFetch(`${ BASE }/v1/namespaces`, {
     method: 'POST',
@@ -578,6 +757,9 @@ export async function createWorkspace(name: string, templateId: string): Promise
       data:       { 'vue.config.js': WORKSPACE_VUE_CONFIG },
     }),
   });
+
+  // What a terminal tab runs, before the pod that mounts it. See ensureWorkspaceTerminal.
+  await ensureWorkspaceTerminal(name);
 
   // Before the Deployment, so the pod's first start already has whatever is in the store. It is
   // rewritten on every start as well, since the store can change after this.
@@ -630,18 +812,24 @@ function workspaceServiceBody(name: string, template: DevTemplate): Json {
 export async function setWorkspaceRunning(name: string, running: boolean): Promise<void> {
   const namespace = workspaceNamespace(name);
   const url = `${ BASE }/v1/apps.deployments/${ namespace }/${ namespace }`;
-  const deployment = await devFetch(url);
 
   if (running) {
     // Every start, not only the first. The pod reads its environment once, when it starts, so
     // this is the only moment a key set since the last start can reach it.
-    const template = templateById(deployment.metadata?.labels?.[LABEL_TEMPLATE] || '');
+    const template = templateById((await devFetch(url)).metadata?.labels?.[LABEL_TEMPLATE] || '');
 
     await mirrorSecrets(name, template);
     // And the same moment is when a workspace made before this version of the product can be
     // brought into line, since all of it is read when the pod starts and only then.
     await bringWorkspaceUpToDate(name, template);
   }
+
+  // Read after all of that, never before it. bringWorkspaceUpToDate writes the same Deployment,
+  // so a copy fetched at the top of this function is stale by the time it gets here, and Steve
+  // answers a stale resourceVersion with a 409: the workspace is brought up to date and then
+  // does not start, with nothing on the page to say why. It was invisible for as long as that
+  // function usually found nothing to change.
+  const deployment = await devFetch(url);
 
   deployment.spec.replicas = running ? 1 : 0;
 
@@ -675,7 +863,21 @@ async function ensureWorkspaceConfig(name: string): Promise<void> {
   const existing = await devFetch(url).catch(() => null);
   const data = { 'vue.config.js': WORKSPACE_VUE_CONFIG };
 
+  // Created when it is not there, not skipped. A workspace whose ConfigMap has gone - deleted by
+  // hand, or lost with a create that got part way - crash-loops on `cp: cannot stat
+  // /dev-config/vue.config.js`, and the one function whose job is bringing a workspace up to
+  // date was walking past the reason.
   if (!existing) {
+    await devFetch(`${ BASE }/v1/configmaps`, {
+      method: 'POST',
+      body:   JSON.stringify({
+        apiVersion: 'v1',
+        kind:       'ConfigMap',
+        metadata:   { namespace, name: WORKSPACE_CONFIG_MAP },
+        data,
+      }),
+    }).catch(() => null);
+
     return;
   }
 
@@ -684,6 +886,58 @@ async function ensureWorkspaceConfig(name: string): Promise<void> {
   }
 
   await devFetch(url, { method: 'PUT', body: JSON.stringify({ ...existing, data }) });
+}
+
+/**
+ * The terminal scripts, in the workspace's namespace and up to date.
+ *
+ * Rewritten on every start rather than created once, for the reason the dev server config is:
+ * the scripts are this repo's, and a workspace made a week ago would otherwise go on running
+ * last week's copy of them for ever.
+ *
+ * It fails quietly. A person whose Rancher session cannot read the magic-closet namespace can
+ * still start a workspace; what they get is a pod without the scripts, which is a terminal that
+ * says claude is not installed rather than a workspace that will not boot.
+ */
+async function ensureWorkspaceTerminal(name: string): Promise<void> {
+  const namespace = workspaceNamespace(name);
+  const seed = await devFetch(`${ BASE }/v1/configmaps/${ SEED_NAMESPACE }/${ SEED_CONFIG_MAP }`).catch(() => null);
+  const data: Record<string, string> = {};
+
+  for (const file of TERMINAL_FILES) {
+    if (seed?.data?.[file]) {
+      data[file] = seed.data[file];
+    }
+  }
+
+  // Nothing to write is not the same as writing nothing: an empty ConfigMap here would replace a
+  // good copy with one that cannot open a terminal.
+  if (!Object.keys(data).length) {
+    return;
+  }
+
+  const url = `${ BASE }/v1/configmaps/${ namespace }/${ WORKSPACE_TERMINAL_MAP }`;
+  const existing = await devFetch(url).catch(() => null);
+
+  if (!existing) {
+    await devFetch(`${ BASE }/v1/configmaps`, {
+      method: 'POST',
+      body:   JSON.stringify({
+        apiVersion: 'v1',
+        kind:       'ConfigMap',
+        metadata:   { namespace, name: WORKSPACE_TERMINAL_MAP },
+        data,
+      }),
+    }).catch(() => null);
+
+    return;
+  }
+
+  if (TERMINAL_FILES.every((file) => existing.data?.[file] === data[file])) {
+    return;
+  }
+
+  await devFetch(url, { method: 'PUT', body: JSON.stringify({ ...existing, data }) }).catch(() => null);
 }
 
 /**
@@ -702,7 +956,13 @@ async function bringWorkspaceUpToDate(name: string, template: DevTemplate | unde
   const namespace = workspaceNamespace(name);
 
   await ensureWorkspaceConfig(name);
+  await ensureWorkspaceTerminal(name);
   await ensureWorkspaceService(name, template);
+
+  // The address a conversation in this workspace posts what it learns to. Written on every start
+  // for the same reason the rest of this function exists: the database is per person and outlives
+  // any one workspace, so a workspace made before it existed has to be told about it.
+  const insights = await insightsServiceUrl().catch(() => '');
 
   const url = `${ BASE }/v1/apps.deployments/${ namespace }/${ namespace }`;
   const deployment = await devFetch(url).catch(() => null);
@@ -721,6 +981,20 @@ async function bringWorkspaceUpToDate(name: string, template: DevTemplate | unde
     changed = true;
   }
 
+  // Not from the template: which database this is depends on who is looking, which a template
+  // cannot know. `INSIGHTS_URL` is the name the harness's own agents already use.
+  if (insights) {
+    const entry = (container.env || []).find((candidate: Json) => candidate.name === 'INSIGHTS_URL');
+
+    if (!entry) {
+      container.env = [...(container.env || []), { name: 'INSIGHTS_URL', value: insights }];
+      changed = true;
+    } else if (entry.value !== insights) {
+      entry.value = insights;
+      changed = true;
+    }
+  }
+
   // The environment its template describes today, which is where the API address lives.
   for (const [envName, value] of Object.entries(template?.env || {})) {
     const wanted = substituteTemplateEnv(value, name, template!);
@@ -730,6 +1004,38 @@ async function bringWorkspaceUpToDate(name: string, template: DevTemplate | unde
       entry.value = wanted;
       changed = true;
     }
+  }
+
+  // The image and the command its template describes today, together and never one without the
+  // other. What a workspace runs is the template's, and a workspace made before the template
+  // learned to install claude would otherwise never learn it.
+  //
+  // Together is the part that is not a tidiness: they are one decision. The version that brought
+  // the command up to date and left the image alone put node's setpriv arguments in front of a
+  // busybox that has a different setpriv, and the workspace crash-looped printing that applet's
+  // usage. A container's command only means anything in the image it was written for.
+  if (template?.image && container.image !== template.image) {
+    container.image = template.image;
+    changed = true;
+  }
+
+  if (template?.command && JSON.stringify(container.command) !== JSON.stringify(template.command)) {
+    container.command = template.command;
+    changed = true;
+  }
+
+  // The terminal scripts, for a workspace whose Deployment predates them. Without the volume the
+  // ConfigMap this just wrote is in the namespace and reaches nothing.
+  const pod = deployment.spec.template.spec;
+
+  if (!(pod.volumes || []).some((volume: Json) => volume.name === 'terminal')) {
+    pod.volumes = [...(pod.volumes || []), {
+      name: 'terminal', configMap: { name: WORKSPACE_TERMINAL_MAP, defaultMode: 0o555, optional: true }
+    }];
+    container.volumeMounts = [...(container.volumeMounts || []), {
+      name: 'terminal', mountPath: WORKSPACE_TERMINAL_MOUNT, readOnly: true
+    }];
+    changed = true;
   }
 
   if (changed) {
@@ -768,21 +1074,86 @@ async function ensureWorkspaceService(name: string, template: DevTemplate | unde
 }
 
 /**
+ * Where a workspace answers inside the cluster, which is an origin of its own without a node port.
+ *
+ * The node port exists so that a person's own browser can reach a workspace at an origin that is
+ * not Rancher's. A browser that is itself in the cluster does not need one: the Service is already
+ * an origin of its own from in there, and it is one nothing outside the cluster can reach. So this
+ * is what the browser sidecar is pointed at, and it is why that sidecar makes a workspace usable
+ * without publishing anything.
+ */
+export function workspaceServiceUrl(name: string, template: DevTemplate): string {
+  const namespace = workspaceNamespace(name);
+
+  return `${ workspaceScheme(template) }://${ namespace }.${ namespace }.svc:${ template.port }/`;
+}
+
+/**
+ * What a workspace's own port actually speaks, which is not what the template's `scheme` says.
+ *
+ * `scheme` is the proxy's half of the arrangement and stays http on purpose: Rancher terminates
+ * the TLS and will not talk to the shell's self-signed dev certificate on the way through. At its
+ * own origin there is no proxy in the way and the same dev server serves https instead (see
+ * workspace-config.ts, which explains why: on http the session cookie Rancher issues is dropped).
+ *
+ * One function because two callers got this wrong in the same direction. The Ports tab asked the
+ * proxy over http whether an own-origin workspace was answering, got the proxy's own failure back,
+ * and printed "Nothing yet" beside a workspace that was serving.
+ */
+export function workspaceScheme(template: DevTemplate | undefined): string {
+  return template?.ownOrigin ? 'https' : (template?.scheme || 'http');
+}
+
+/**
+ * The address a published port answers on, which is the node's own.
+ *
+ * This used to be `window.location.hostname`, on the argument that the browser had just reached
+ * Rancher at it so it could reach a node port at it too. That argument is wrong the moment the
+ * two are not the same machine, and here they never are: Rancher is reached at a name that
+ * resolves on its own network and nowhere else, so every published port this product offered was
+ * a link that only worked from inside. What a node port is *for* is being reachable from outside,
+ * so the address has to be the node's.
+ *
+ * ExternalIP first and InternalIP after it, which is the order kubectl's own `-o wide` uses: a
+ * cloud node has both and only the first is routable from off the cluster, and a bare-metal or
+ * dev node has only the second, which is still the best address there is. Any node's will do,
+ * because a NodePort is opened on every node, so this does not need to know which one the pod
+ * landed on.
+ *
+ * Cached for the life of the page. Node addresses do not change, and this is asked once per row
+ * of the Ports tab.
+ */
+let nodeAddressPromise: Promise<string> | null = null;
+
+export function nodeAddress(): Promise<string> {
+  nodeAddressPromise = nodeAddressPromise || (async() => {
+    const nodes = await devFetch(`${ BASE }/v1/nodes`).catch(() => null);
+    const addresses = (nodes?.data || []).flatMap((node: Json) => node.status?.addresses || []);
+    const of = (type: string) => addresses.find((entry: Json) => entry.type === type)?.address;
+
+    // The page's own host is the last resort rather than the first. It is wrong, but a row with
+    // no address at all is worse, and this is the case where the person cannot read the nodes.
+    return of('ExternalIP') || of('InternalIP') || window.location.hostname;
+  })();
+
+  return nodeAddressPromise;
+}
+
+/**
  * Where a workspace is reachable when its template asked for an origin of its own.
  *
- * The hostname is this page's rather than the node's InternalIP, and that is the point: the
- * browser reached Rancher at it, so it can reach the node port at it too. A node's InternalIP is
- * frequently an address only the cluster can route to, and a link nobody can open is worse than
- * no link.
+ * The host is passed in rather than awaited here, because the two callers are tables and a table
+ * cell cannot await: they resolve nodeAddress() once when they refresh and hand it to every row.
+ *
+ * https, on the dev server's own self-signed certificate. See workspace-config.ts: over http the
+ * session cookie Rancher issues is dropped and the login silently fails.
  */
-export function workspaceOriginUrl(service: DevService | null): string {
-  if (!service?.nodePort) {
+export function workspaceOriginUrl(service: DevService | null, host: string): string {
+  if (!service?.nodePort || !host) {
     return '';
   }
 
-  // https, on the dev server's own self-signed certificate. See workspace-config.ts: over http
-  // the session cookie Rancher issues is dropped and the login silently fails.
-  return `https://${ window.location.hostname }:${ service.nodePort }/`;
+  return `https://${ host }:${ service.nodePort }/`;
 }
 
 /**
@@ -1041,6 +1412,40 @@ const MIRROR_SECRET = 'dev-secrets';
 
 /** The dev server config a workspace boots with, in the workspace's own namespace. */
 const WORKSPACE_CONFIG_MAP = 'dev-workspace-config';
+
+/**
+ * The terminal scripts a workspace's pod runs, in the workspace's own namespace.
+ *
+ * They are not written here and they are not a second copy of anything. The dev server pod is
+ * seeded with them by the magic-closet extension (`dev-extension.ts`), into a ConfigMap in that
+ * extension's namespace, and this copies the terminal half of that ConfigMap into each
+ * workspace. A workspace cannot mount the original: a ConfigMap volume only reaches pods in its
+ * own namespace, which is exactly the reason a workspace's Conversations tab was a bare shell
+ * for as long as it was.
+ *
+ * Copying rather than re-deriving keeps one source of truth. Edit `dev-extension/pod/*`, run
+ * `gen-dev-extension-seed.mjs` and `apply-dev-extension-seed.mjs`, and every workspace picks the
+ * new version up on its next start, the same way the dev pod's own tabs do.
+ */
+const WORKSPACE_TERMINAL_MAP = 'dev-terminal';
+const WORKSPACE_TERMINAL_MOUNT = '/seed';
+
+
+/** Where the originals live: the magic-closet extension's own seed. */
+const SEED_NAMESPACE = 'magic-closet';
+const SEED_CONFIG_MAP = 'magic-closet-dev-extension';
+
+/**
+ * The keys to copy, named rather than filtered.
+ *
+ * The seed also carries the whole dev-extension source tree (flattened, `pkg__dev-extension__…`),
+ * which is hundreds of kilobytes and has nothing to do with running a terminal. A ConfigMap is
+ * capped at a megabyte, so "copy everything" is not a smaller decision than this list.
+ */
+const TERMINAL_FILES = [
+  'shell.sh', 'terminal-tools.sh', 'claude-session.sh', 'claude-credentials.mjs',
+  'claude-defaults.mjs', 'tmux.conf', 'session-claude.md',
+];
 
 /** Where the dev server's pod lives, which is the pod the global terminals attach to. */
 const DEV_POD_NAMESPACE = 'magic-closet';
@@ -1723,6 +2128,549 @@ function missingSecrets(sidecar: DevSidecar, template: DevTemplate | undefined, 
 }
 
 /**
+ * The Chromium extension the browser sidecar runs with, built for one workspace.
+ *
+ * Written on every start, like the terminal scripts and for the same reason: it carries this
+ * workspace's own addresses and its own generated passwords, and both can change after the
+ * sidecar was created. A Secret rather than a ConfigMap because of what is in it.
+ */
+const BROWSER_EXTENSION_SECRET = 'dev-browser-extension';
+export const BROWSER_EXTENSION_MOUNT = '/extension';
+
+async function ensureBrowserExtension(workspace: string, template: DevTemplate, store: Record<string, string>): Promise<void> {
+  const namespace = workspaceNamespace(workspace);
+  const rancher = (template.sidecars || []).find((sidecar) => sidecar.providesApi);
+
+  // The pages the content scripts run on: this workspace's own Rancher, and the dashboard it
+  // serves. Both are in-cluster addresses, so the extension is inert anywhere else, which is the
+  // point - it carries passwords and it should not offer them to a page that merely looks like a
+  // Rancher login.
+  const matches = [
+    rancher ? `${ sidecarServiceUrl(workspace, rancher) }/*` : '',
+    `${ workspaceServiceUrl(workspace, template).replace(/\/$/, '') }/*`,
+  ].filter(Boolean);
+
+  // The accounts the workspace's own Rancher is bootstrapped with. admin is the generated
+  // bootstrap password; user1 to user3 are the auth sidecars' shared one. See AUTH_SCRIPT.
+  const admin = store[templateSecretKey(template.id, 'RANCHER_BOOTSTRAP_PASSWORD')] || '';
+  const user = store[templateSecretKey(template.id, 'AUTH_USER_PASSWORD')] || '';
+  const creds = [
+    { label: 'Admin', username: 'admin', password: admin },
+    ...[1, 2, 3].map((n) => ({ label: `User ${ n }`, username: `user${ n }`, password: user })),
+  ].filter((entry) => !!entry.password);
+
+  const data: Record<string, string> = {};
+
+  for (const [file, body] of Object.entries(BROWSER_EXTENSION_FILES)) {
+    data[file] = encodeSecret(body
+      .replace('{{matches}}', matches.join('",\n        "'))
+      .replace('{{creds}}', JSON.stringify(creds, null, 2)));
+  }
+
+  const url = `${ BASE }/v1/secrets/${ namespace }/${ BROWSER_EXTENSION_SECRET }`;
+  const existing = await devFetch(url).catch(() => null);
+
+  if (!existing) {
+    await devFetch(`${ BASE }/v1/secrets`, {
+      method: 'POST',
+      body:   JSON.stringify({
+        apiVersion: 'v1',
+        kind:       'Secret',
+        metadata:   { namespace, name: BROWSER_EXTENSION_SECRET },
+        type:       'Opaque',
+        data,
+      }),
+    }).catch(() => null);
+
+    return;
+  }
+
+  await devFetch(url, { method: 'PUT', body: JSON.stringify({ ...existing, data }) }).catch(() => null);
+}
+
+/**
+ * The values a workspace's sidecars have been configured with.
+ *
+ * One ConfigMap for all of them, keyed `<sidecar>.<param>`, because that is the shape the secret
+ * store already uses for the same kind of question and because a ConfigMap per sidecar would be
+ * five objects saying one thing each. Values only: what a parameter *is* lives in the template,
+ * which is code, and a value with no declaration behind it is ignored.
+ */
+const SIDECAR_PARAMS_MAP = 'dev-sidecar-params';
+
+export async function sidecarParams(workspace: string, sidecar: DevSidecar): Promise<Record<string, string>> {
+  const namespace = workspaceNamespace(workspace);
+  const config = await devFetch(`${ BASE }/v1/configmaps/${ namespace }/${ SIDECAR_PARAMS_MAP }`).catch(() => null);
+  const out: Record<string, string> = {};
+
+  for (const param of sidecar.params || []) {
+    out[param.id] = config?.data?.[`${ sidecar.id }.${ param.id }`] ?? (param.default || '');
+  }
+
+  return out;
+}
+
+/**
+ * Save what a sidecar is configured with.
+ *
+ * Applying it is the caller's next step, and that step is a restart: a container reads its
+ * environment when it starts and at no other time.
+ */
+export async function setSidecarParams(workspace: string, sidecar: DevSidecar, values: Record<string, string>): Promise<void> {
+  const namespace = workspaceNamespace(workspace);
+  const url = `${ BASE }/v1/configmaps/${ namespace }/${ SIDECAR_PARAMS_MAP }`;
+  const existing = await devFetch(url).catch(() => null);
+  const data: Record<string, string> = { ...(existing?.data || {}) };
+
+  for (const [id, value] of Object.entries(values)) {
+    data[`${ sidecar.id }.${ id }`] = value;
+  }
+
+  if (!existing) {
+    await devFetch(`${ BASE }/v1/configmaps`, {
+      method: 'POST',
+      body:   JSON.stringify({
+        apiVersion: 'v1',
+        kind:       'ConfigMap',
+        metadata:   { namespace, name: SIDECAR_PARAMS_MAP },
+        data,
+      }),
+    });
+
+    return;
+  }
+
+  await devFetch(url, { method: 'PUT', body: JSON.stringify({ ...existing, data }) });
+}
+
+/**
+ * The whole of a sidecar's log, for the card's log window.
+ *
+ * podLogTail next door answers a different question - what is it doing right now, in one line, on
+ * a card - and takes the last line for it. This is what someone opens when that line was not
+ * enough, so it is the last few hundred.
+ */
+export async function sidecarLog(workspace: string, sidecar: DevSidecar, lines = 500): Promise<string> {
+  const namespace = workspaceNamespace(workspace);
+  const pods = await devFetch(`${ BASE }/v1/pods/${ namespace }`).catch(() => null);
+  const pod = (pods?.data || []).find((candidate: Json) => candidate.metadata?.labels?.[LABEL_SIDECAR] === sidecar.id);
+
+  if (!pod) {
+    return '';
+  }
+
+  // `timestamps` because a log line on its own says what happened and not when, and a sidecar
+  // that takes ten minutes to install two helm charts is one where the gap between two lines is
+  // the interesting part. The apiserver prefixes each line with an RFC3339 time; what to do with
+  // that is the caller's.
+  const url = `${ BASE }/api/v1/namespaces/${ namespace }/pods/${ pod.metadata.name }/log?container=sidecar&tailLines=${ lines }&timestamps=true`;
+
+  // No Accept header, deliberately. The log subresource answers in plain text and negotiates
+  // against a list that does not include it: asking for `text/plain` is a 406 saying "only the
+  // following media types are accepted", and asking for JSON gets a log wrapped in nothing.
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error(`The log could not be read: ${ response.status }.`);
+  }
+
+  return response.text();
+}
+
+/**
+ * The prompts this person's queued conversations open with.
+ *
+ * Per user and next to the secret store, for the same reason it is: two people using this
+ * product have different ideas about what a review should say, and neither should be editing the
+ * other's. Defaults are written in the first time they are asked for, so the page has something
+ * to show and to edit rather than an empty box.
+ */
+async function promptsName(): Promise<string> {
+  return `dev-prompts-${ await currentOwner() }`;
+}
+
+export async function listPrompts(): Promise<DevPrompt[]> {
+  const name = await promptsName();
+  const config = await devFetch(`${ BASE }/v1/configmaps/${ DEV_SYSTEM_NAMESPACE }/${ name }`).catch(() => null);
+
+  // The declaration is what says which prompts exist and what they are for; the ConfigMap only
+  // holds the text. So a prompt added to the code appears for everyone, with its default, and a
+  // prompt removed from the code stops being offered even if someone's copy still has the text.
+  return DEFAULT_PROMPTS.map((prompt) => ({
+    ...prompt,
+    text: config?.data?.[prompt.id] ?? prompt.text,
+  }));
+}
+
+export async function savePrompts(texts: Record<string, string>): Promise<void> {
+  const name = await promptsName();
+  const url = `${ BASE }/v1/configmaps/${ DEV_SYSTEM_NAMESPACE }/${ name }`;
+  const existing = await devFetch(url).catch(() => null);
+  const data = { ...(existing?.data || {}), ...texts };
+
+  if (!existing) {
+    await devFetch(`${ BASE }/v1/configmaps`, {
+      method: 'POST',
+      body:   JSON.stringify({
+        apiVersion: 'v1',
+        kind:       'ConfigMap',
+        metadata:   { namespace: DEV_SYSTEM_NAMESPACE, name },
+        data,
+      }),
+    });
+
+    return;
+  }
+
+  await devFetch(url, { method: 'PUT', body: JSON.stringify({ ...existing, data }) });
+}
+
+/**
+ * Queue a conversation in a workspace: a prompt the next pane to open will start on.
+ *
+ * A file in the pod rather than a message to something, because there is nothing to send it to:
+ * a conversation is a tmux session that may not exist yet, in a workspace that may still be
+ * pulling. The file waits, and shell.sh hands it to claude when the pane starts, once. See
+ * claude-session.sh.
+ *
+ * The text is base64 on the way in. It is somebody's prose, it will contain quotes and newlines,
+ * and building a shell command out of it any other way is a quoting bug waiting for the first
+ * apostrophe.
+ */
+export async function queueConversation(workspace: string, session: string | number, prompt: string): Promise<void> {
+  const namespace = workspaceNamespace(workspace);
+  const pod = await workspacePod(workspace);
+
+  if (!pod) {
+    throw new Error('This workspace has no pod yet, so there is nothing to queue a conversation in.');
+  }
+
+  const encoded = encodeSecret(prompt);
+  const file = `${ WORKSPACE_QUEUE }/${ workspaceSession(session) }`;
+
+  await podExecOnce(namespace, pod, WORKSPACE_CONTAINER, asWorkspaceUser(
+    `mkdir -p ${ WORKSPACE_QUEUE } && echo ${ encoded } | base64 -d > ${ file }`,
+  ));
+}
+
+/**
+ * The workspace API: one service, for everything that is not a person.
+ *
+ * A page cannot be the only way to make a workspace. An action that has just been told to fix
+ * something has no browser and no Rancher session, and it should not need either: see
+ * WORKSPACE_API_SERVER, which is the service, and this, which puts it in the cluster.
+ *
+ * One for everybody rather than one each, because it is infrastructure rather than somebody's:
+ * what it holds is the templates, and what it makes is a namespace. The rights that needs are
+ * cluster-scoped, which is the reason it is a service at all and not something the page does.
+ */
+const API_NAME = 'dev-api';
+const API_PORT = 8080;
+
+/** Where the extension leaves the templates for it, so what a workspace runs is decided once. */
+const API_TEMPLATES = 'dev-api-templates';
+
+/** Where a pod reaches it, which is what an action inside a workspace is given. */
+export function workspaceApiUrl(): string {
+  return `http://${ API_NAME }.${ DEV_SYSTEM_NAMESPACE }.svc:${ API_PORT }`;
+}
+
+/**
+ * The templates as data, which is what the service renders from.
+ *
+ * Published rather than reimplemented: the service makes the same Deployment the page does, from
+ * the same declaration, so a template that changes here changes there. Only what it needs -
+ * everything about a sidecar except its identity is the page's business.
+ */
+function publishedTemplates(): Record<string, Json> {
+  const out: Record<string, Json> = {};
+
+  for (const template of TEMPLATES) {
+    out[template.id] = {
+      label:      template.label,
+      image:      template.image,
+      command:    template.command,
+      port:       template.port,
+      scheme:     template.scheme,
+      ownOrigin:  template.ownOrigin,
+      hostPath:   template.hostPath,
+      env:        template.env,
+      sidecars:   (template.sidecars || []).map((sidecar) => ({
+        id: sidecar.id, scheme: sidecar.scheme, providesApi: sidecar.providesApi,
+      })),
+      // The two ConfigMaps a workspace boots from, by name, so the service writes the same ones.
+      configMaps: {
+        [WORKSPACE_CONFIG_MAP]: { 'vue.config.js': WORKSPACE_VUE_CONFIG },
+      },
+    };
+  }
+
+  return out;
+}
+
+/**
+ * Create the service if it is not there, and keep its script and its templates current.
+ *
+ * Quiet, like everything else this extension puts in the cluster: it runs on load for every user
+ * including ones who cannot create any of it, and a page that threw here would be a page that
+ * never rendered for them.
+ */
+export async function ensureWorkspaceApi(): Promise<void> {
+  const namespace = DEV_SYSTEM_NAMESPACE;
+  const labels = { app: API_NAME };
+
+  // The script, and the templates it renders from. Both rewritten whenever they differ, so an
+  // edit in this repo reaches a service that already exists.
+  for (const [name, data] of [
+    [API_NAME, { 'server.mjs': WORKSPACE_API_SERVER }],
+    [API_TEMPLATES, { 'templates.json': JSON.stringify(publishedTemplates(), null, 2) }],
+  ] as [string, Record<string, string>][]) {
+    const url = `${ BASE }/v1/configmaps/${ namespace }/${ name }`;
+    const existing = await devFetch(url).catch(() => null);
+
+    if (!existing) {
+      await devFetch(`${ BASE }/v1/configmaps`, {
+        method: 'POST',
+        body:   JSON.stringify({
+          apiVersion: 'v1', kind: 'ConfigMap', metadata: { namespace, name, labels }, data,
+        }),
+      }).catch(() => null);
+    } else if (JSON.stringify(existing.data) !== JSON.stringify(data)) {
+      await devFetch(url, { method: 'PUT', body: JSON.stringify({ ...existing, data }) }).catch(() => null);
+    }
+  }
+
+  await ensure('serviceaccounts', namespace, API_NAME, {
+    apiVersion: 'v1', kind: 'ServiceAccount', metadata: { namespace, name: API_NAME },
+  });
+
+  // Cluster-scoped, because a workspace is a namespace and nothing namespaced can make one. The
+  // verbs are the ones it uses and no others: it never deletes anything, and deleting a
+  // workspace stays a thing a person does from the page.
+  await ensure('rbac.authorization.k8s.io.clusterroles', null, API_NAME, {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind:       'ClusterRole',
+    metadata:   { name: API_NAME },
+    rules:      [
+      { apiGroups: [''], resources: ['namespaces'], verbs: ['get', 'list', 'create'] },
+      {
+        apiGroups: [''], resources: ['serviceaccounts', 'configmaps', 'secrets', 'services'], verbs: ['get', 'create']
+      },
+      {
+        apiGroups: ['apps'], resources: ['deployments'], verbs: ['get', 'create']
+      },
+      {
+        apiGroups: ['rbac.authorization.k8s.io'], resources: ['rolebindings'], verbs: ['get', 'create']
+      },
+    ],
+  });
+
+  await ensure('rbac.authorization.k8s.io.clusterrolebindings', null, API_NAME, {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind:       'ClusterRoleBinding',
+    metadata:   { name: API_NAME },
+    roleRef:    { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: API_NAME },
+    subjects:   [{ kind: 'ServiceAccount', name: API_NAME, namespace }],
+  });
+
+  // It binds `edit` into each workspace it makes, and Kubernetes refuses to grant rights the
+  // granter does not hold. So it holds them, which is the price of making a workspace whose
+  // conversations can manage their own namespace.
+  await ensure('rbac.authorization.k8s.io.clusterrolebindings', null, `${ API_NAME }-edit`, {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind:       'ClusterRoleBinding',
+    metadata:   { name: `${ API_NAME }-edit` },
+    roleRef:    { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'edit' },
+    subjects:   [{ kind: 'ServiceAccount', name: API_NAME, namespace }],
+  });
+
+  await ensure('apps.deployments', namespace, API_NAME, {
+    apiVersion: 'apps/v1',
+    kind:       'Deployment',
+    metadata:   { namespace, name: API_NAME, labels },
+    spec:       {
+      replicas: 1,
+      selector: { matchLabels: labels },
+      template: {
+        metadata: { labels },
+        spec:     {
+          serviceAccountName: API_NAME,
+          containers:         [{
+            name:    'api',
+            image:   'node:24',
+            command: ['node', '/seed/server.mjs'],
+            ports:   [{ name: 'http', containerPort: API_PORT }],
+            env:     [
+              { name: 'PORT', value: String(API_PORT) },
+              // The apiserver's own CA, so node verifies it rather than being told not to.
+              { name: 'NODE_EXTRA_CA_CERTS', value: '/var/run/secrets/kubernetes.io/serviceaccount/ca.crt' },
+            ],
+            volumeMounts: [
+              { name: 'seed', mountPath: '/seed', readOnly: true },
+              { name: 'templates', mountPath: '/templates', readOnly: true },
+            ],
+            readinessProbe: { httpGet: { path: '/', port: API_PORT }, periodSeconds: 10 },
+          }],
+          volumes: [
+            { name: 'seed', configMap: { name: API_NAME } },
+            { name: 'templates', configMap: { name: API_TEMPLATES } },
+          ],
+        },
+      },
+    },
+  });
+
+  await ensure('services', namespace, API_NAME, {
+    apiVersion: 'v1',
+    kind:       'Service',
+    metadata:   { namespace, name: API_NAME, labels },
+    spec:       { selector: labels, ports: [{ name: 'http', port: API_PORT, targetPort: 'http' }] },
+  });
+}
+
+/**
+ * The Insights database, which is one per person rather than one per workspace.
+ *
+ * That is the whole shape of the feature: what someone wants to ask is "what have my agents been
+ * doing", and the answer spans every workspace they have. So it lives in dev-system beside the
+ * secret store, named after the same owner, and every workspace is told where it is.
+ *
+ * It is a plain node:24 with a script from a ConfigMap and a hostPath for the file. There is no
+ * image to build and nothing to install: node has carried a SQLite driver in core since 22.5.
+ * See INSIGHTS_SERVER.
+ */
+const INSIGHTS_PORT = 8080;
+const INSIGHTS_HOST_PATH = '/var/lib/rancher/dev-insights';
+
+/** The Deployment, Service and ConfigMap are all called this. */
+export async function insightsName(): Promise<string> {
+  return `dev-insights-${ await currentOwner() }`;
+}
+
+/**
+ * Where a pod reaches it, which is what a workspace's agents are given.
+ *
+ * A cluster-internal address, so it is reachable from any namespace and from nowhere outside the
+ * cluster. Nothing authenticates it beyond that: it holds what this person's own agents chose to
+ * record, in a cluster they already have a workspace in.
+ */
+export async function insightsServiceUrl(): Promise<string> {
+  return `http://${ await insightsName() }.${ DEV_SYSTEM_NAMESPACE }.svc:${ INSIGHTS_PORT }`;
+}
+
+/** Where the browser reaches it: the same door every other in-cluster address uses. */
+export async function insightsProxyUrl(): Promise<string> {
+  const name = await insightsName();
+
+  return `${ BASE }/api/v1/namespaces/${ DEV_SYSTEM_NAMESPACE }/services/http:${ name }:${ INSIGHTS_PORT }/proxy`;
+}
+
+/**
+ * Create it if it is not there, and bring its script up to date if it is.
+ *
+ * Idempotent and quiet, the way everything else this extension puts in the cluster is: it runs
+ * when the Insights page loads, for every user, including ones who cannot create anything in
+ * dev-system, and a page that threw here would be a page that never rendered.
+ */
+export async function ensureInsights(): Promise<void> {
+  const name = await insightsName();
+  const namespace = DEV_SYSTEM_NAMESPACE;
+  const labels = { app: name };
+  const url = `${ BASE }/v1/configmaps/${ namespace }/${ name }`;
+  const existing = await devFetch(url).catch(() => null);
+  const data = { 'server.mjs': INSIGHTS_SERVER };
+
+  if (!existing) {
+    await devFetch(`${ BASE }/v1/configmaps`, {
+      method: 'POST',
+      body:   JSON.stringify({
+        apiVersion: 'v1', kind: 'ConfigMap', metadata: { namespace, name, labels }, data,
+      }),
+    }).catch(() => null);
+  } else if (existing.data?.['server.mjs'] !== INSIGHTS_SERVER) {
+    await devFetch(url, { method: 'PUT', body: JSON.stringify({ ...existing, data }) }).catch(() => null);
+  }
+
+  await ensure('apps.deployments', namespace, name, {
+    apiVersion: 'apps/v1',
+    kind:       'Deployment',
+    metadata:   { namespace, name, labels },
+    spec:       {
+      replicas: 1,
+      selector: { matchLabels: labels },
+      // Recreate: the database is one file on a hostPath, and two writers of one SQLite file is
+      // the one arrangement it is not built for.
+      strategy: { type: 'Recreate' },
+      template: {
+        metadata: { labels },
+        spec:     {
+          containers: [{
+            name:         'insights',
+            image:        'node:24',
+            command:      ['node', '/seed/server.mjs'],
+            ports:        [{ name: 'http', containerPort: INSIGHTS_PORT }],
+            env:          [{ name: 'PORT', value: String(INSIGHTS_PORT) }],
+            volumeMounts: [
+              { name: 'seed', mountPath: '/seed', readOnly: true },
+              { name: 'data', mountPath: '/data' },
+            ],
+            readinessProbe: { tcpSocket: { port: INSIGHTS_PORT }, periodSeconds: 10 },
+          }],
+          volumes: [
+            { name: 'seed', configMap: { name } },
+            // Per owner, so two people's databases are two files, and on the node so a restart
+            // is not the end of what was recorded.
+            {
+              name: 'data', hostPath: { path: `${ INSIGHTS_HOST_PATH }/${ name }`, type: 'DirectoryOrCreate' }
+            },
+          ],
+        },
+      },
+    },
+  });
+
+  await ensure('services', namespace, name, {
+    apiVersion: 'v1',
+    kind:       'Service',
+    metadata:   { namespace, name, labels },
+    spec:       { selector: labels, ports: [{ name: 'http', port: INSIGHTS_PORT, targetPort: 'http' }] },
+  });
+}
+
+export interface InsightsTable {
+  name: string;
+  columns: string[];
+  rows: number;
+}
+
+/** The tables, with their row counts, which is what the page's tabs are. */
+export async function insightsTables(): Promise<InsightsTable[]> {
+  const response = await fetch(`${ await insightsProxyUrl() }/api/tables`, { cache: 'no-store' });
+
+  if (!response.ok) {
+    throw new Error('The insights database is not answering yet.');
+  }
+
+  return (await response.json()).tables || [];
+}
+
+/** One query, run in the pod. See the server: it refuses anything that is not a SELECT. */
+export async function insightsQuery(sql: string): Promise<{ columns: string[]; rows: Json[] }> {
+  const response = await fetch(`${ await insightsProxyUrl() }/api/query`, {
+    method:  'POST',
+    headers: { 'content-type': 'application/json' },
+    body:    JSON.stringify({ sql }),
+  });
+  const body = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(body.error || `The query failed: ${ response.status }.`);
+  }
+
+  return body;
+}
+
+/**
  * The account a manager sidecar runs as, in the workspace's own namespace.
  *
  * Not the workspace's account, which is bound to Kubernetes' aggregated `edit`. `edit`
@@ -1884,6 +2832,15 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
   await ensureSidecarScripts(workspace, sidecar);
   await ensureManagerRbac(workspace, sidecar);
 
+  // What the gear was last saved with, read here rather than in the pod spec so both the create
+  // and the update path get the same answer from one fetch.
+  const params = await sidecarParams(workspace, sidecar);
+
+  // The browser's own extension, built for this workspace. See ensureBrowserExtension.
+  if (sidecar.extension) {
+    await ensureBrowserExtension(workspace, template, store);
+  }
+
   // The workspace itself, brought up to date. A workspace made before its template asked for an
   // origin of its own is still in proxy mode, and starting its Rancher is exactly the moment
   // somebody expects that to have been sorted out: without this they get a restart and a
@@ -1898,7 +2855,7 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
     // academic: the auth switch added five secrets and the node's address to a manager that already
     // existed, and a manager without them starts, says nothing, and cannot configure anything.
     existing.spec.replicas = 1;
-    existing.spec.template.spec = sidecarPodSpec(workspace, sidecar);
+    existing.spec.template.spec = sidecarPodSpec(workspace, sidecar, template, params);
     await devFetch(url, { method: 'PUT', body: JSON.stringify(existing) });
 
     return;
@@ -1920,7 +2877,7 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
         // rolling update there are two of them: the card would read the older pod's state and
         // report Running while the new one cannot start at all.
         strategy: { type: 'Recreate' },
-        template: { metadata: { labels }, spec: sidecarPodSpec(workspace, sidecar) },
+        template: { metadata: { labels }, spec: sidecarPodSpec(workspace, sidecar, template, params) },
       },
     }),
   });
@@ -1935,12 +2892,19 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
  * the same answer: what a sidecar's pod should be is a property of the declaration, and a
  * Deployment that already exists is just as entitled to today's version of it as a new one.
  */
-function sidecarPodSpec(workspace: string, sidecar: DevSidecar): Json {
+function sidecarPodSpec(workspace: string, sidecar: DevSidecar, template: DevTemplate, params: Record<string, string> = {}): Json {
   const namespace = workspaceNamespace(workspace);
   const name = sidecarName(workspace, sidecar.id);
+  const owns = (template.sidecars || []).find((candidate) => candidate.providesApi);
   const substitute = (value: string) => value
     .replace(/{{namespace}}/g, namespace)
-    .replace(/{{workspace}}/g, workspace);
+    .replace(/{{workspace}}/g, workspace)
+    .replace(/{{workspaceUrl}}/g, workspaceServiceUrl(workspace, template))
+    // The workspace's own Rancher, by the address it will answer on whether or not it is running
+    // yet. Written in from the moment the sidecar that uses it is created, for the reason
+    // substituteTemplateEnv gives: an address that appears only once something is up is an
+    // address nothing can be pointed at in advance.
+    .replace(/{{ownRancher}}/g, owns ? sidecarServiceUrl(workspace, owns) : '');
 
   return {
     // A manager runs as an account of its own. See ensureManagerRbac.
@@ -1954,6 +2918,11 @@ function sidecarPodSpec(workspace: string, sidecar: DevSidecar): Json {
       env: [
         ...Object.entries(sidecar.env || {}).map(([envName, value]) => ({
           name: envName, value: substitute(value)
+        })),
+        // What the card's gear was last saved with. Declared values only, so a key left in the
+        // ConfigMap by a parameter that has since been removed reaches nothing. See sidecarParams.
+        ...(sidecar.params || []).map((param) => ({
+          name: param.env, value: params[param.id] ?? (param.default || ''),
         })),
         // By reference, never by value: the token is not in the pod spec, so it is not
         // in `kubectl get deploy -o yaml` either.
@@ -1986,11 +2955,36 @@ function sidecarPodSpec(workspace: string, sidecar: DevSidecar): Json {
         },
       } : {}),
       ...(sidecar.preStop ? { lifecycle: { preStop: { exec: { command: sidecar.preStop } } } } : {}),
-      ...(sidecar.scripts ? { volumeMounts: [{ name: 'scripts', mountPath: '/scripts', readOnly: true }] } : {}),
+      volumeMounts: [
+        ...(sidecar.scripts ? [{ name: 'scripts', mountPath: '/scripts', readOnly: true }] : []),
+        ...(sidecar.shm ? [{ name: 'shm', mountPath: '/dev/shm' }] : []),
+        // One mount per file, with subPath, rather than the whole Secret at one path.
+        //
+        // A Secret volume is a directory of symlinks into a hidden `..data` directory, and
+        // Chromium will not load an unpacked extension whose manifest is one: it reports nothing
+        // and runs without it, which is exactly what it did. A subPath mount is a real file. The
+        // cost is that these no longer update in place, which does not matter here because the
+        // Secret is rewritten and the pod rolled in the same breath. See ensureBrowserExtension.
+        ...(sidecar.extension ? Object.keys(BROWSER_EXTENSION_FILES).map((file) => ({
+          name: 'extension', mountPath: `${ BROWSER_EXTENSION_MOUNT }/${ file }`, subPath: file, readOnly: true,
+        })) : []),
+      ],
     }],
-    ...(sidecar.scripts ? {
-      volumes: [{ name: 'scripts', configMap: { name: `${ name }-scripts`, defaultMode: 0o555 } }],
-    } : {}),
+    volumes: [
+      ...(sidecar.scripts ? [{ name: 'scripts', configMap: { name: `${ name }-scripts`, defaultMode: 0o555 } }] : []),
+      // A container gets 64MB of shared memory by default, and Chromium's renderers pass their
+      // surfaces through it: the documented symptom of leaving it at 64MB is tabs dying as "Aw,
+      // Snap" on pages of any size. The closet's compose file says the same thing to the same
+      // image as `shm_size: 1gb`. Memory-backed, so it is the pod's own memory rather than the
+      // node's disk.
+      ...(sidecar.shm ? [{ name: 'shm', emptyDir: { medium: 'Memory', sizeLimit: '1Gi' } }] : []),
+      // The extension's files, as a directory Chromium can be pointed at. `optional`, so a
+      // sidecar that starts before the Secret is written comes up without it rather than
+      // staying in ContainerCreating for ever.
+      ...(sidecar.extension ? [{
+        name: 'extension', secret: { secretName: BROWSER_EXTENSION_SECRET, optional: true }
+      }] : []),
+    ],
   };
 }
 
@@ -2161,8 +3155,19 @@ export async function restartSidecar(workspace: string, sidecar: DevSidecar, tem
   // because a template that has since declared a new one (the auth switch added two) would
   // otherwise mirror nothing for it, and the sidecar would come back without a value it needs.
   await ensureSidecarScripts(workspace, sidecar);
-  await mirrorSecrets(workspace, template, await ensureGeneratedSecrets(template));
+
+  const store = await ensureGeneratedSecrets(template);
+
+  await mirrorSecrets(workspace, template, store);
   await ensureSidecarService(workspace, sidecar);
+
+  // The same rewrite the start path does. Restart is what someone presses when the product has
+  // changed its mind about what this pod should be, and the extension is part of that: without
+  // this, a browser that was already running when the extension was added comes back with the
+  // volume declared and nothing in it.
+  if (sidecar.extension) {
+    await ensureBrowserExtension(workspace, template, store);
+  }
 
   const meta = deployment.spec.template.metadata;
 
@@ -2170,7 +3175,7 @@ export async function restartSidecar(workspace: string, sidecar: DevSidecar, tem
   deployment.spec.replicas = 1;
   // Today's declaration, for the reason the start path takes it: a restart is what someone presses
   // when the product has changed its mind about what this pod should be.
-  deployment.spec.template.spec = sidecarPodSpec(workspace, sidecar);
+  deployment.spec.template.spec = sidecarPodSpec(workspace, sidecar, template, await sidecarParams(workspace, sidecar));
 
   await devFetch(url, { method: 'PUT', body: JSON.stringify(deployment) });
 }
@@ -2210,10 +3215,283 @@ export function sidecarProxyUrl(workspace: string, sidecar: DevSidecar): string 
   return `${ BASE }/api/v1/namespaces/${ namespace }/services/${ scheme }:${ sidecarName(workspace, sidecar.id) }:${ sidecar.port }/proxy/`;
 }
 
+/** A socket the workspace's own process is listening on, as its pod reports it. */
+export interface DevListening {
+  port: number;
+  /**
+   * Bound to loopback, so publishing it would not help: a Service routes to the pod's address,
+   * and a server listening only on 127.0.0.1 refuses that connection. Worth saying rather than
+   * hiding, because the fix is one flag on whatever is being run.
+   */
+  loopback: boolean;
+}
+
+/** Whether an address in /proc/net/tcp is a loopback one, in either family. */
+function isLoopback(address: string): boolean {
+  // Little-endian hex, so 127.0.0.1 is 0100007F. The v6 form is ::1, which is fifteen zero bytes
+  // and a one, written by the kernel in this order.
+  return address === '0100007F' || address === '00000000000000000000000001000000';
+}
+
+/**
+ * What the workspace is actually listening on, rather than what its Service says.
+ *
+ * From /proc/net/tcp in the pod, which is the one source that needs nothing installed: `ss` and
+ * `netstat` are both absent from the image a workspace runs, and a detection that depends on a
+ * package the person has to install first is not automatic.
+ *
+ * `0A` is TCP_LISTEN. Everything else in those files is a connection, including the ones this
+ * page's own request makes, so a state filter is what separates a server from its traffic.
+ */
+export async function workspaceListening(name: string): Promise<DevListening[]> {
+  const namespace = workspaceNamespace(name);
+  const pod = await workspacePod(name);
+
+  if (!pod) {
+    return [];
+  }
+
+  const out = await podExecOnce(namespace, pod, WORKSPACE_CONTAINER, [
+    '/bin/sh', '-c', 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null || true',
+  ]);
+
+  const found = new Map<number, boolean>();
+
+  for (const line of out.split('\n')) {
+    const fields = line.trim().split(/\s+/);
+
+    if (fields[3] !== '0A' || !fields[1]) {
+      continue;
+    }
+
+    const [address, hexPort] = fields[1].split(':');
+    const port = parseInt(hexPort, 16);
+
+    if (!port) {
+      continue;
+    }
+
+    // A port bound on both a real address and loopback is reachable, so the reachable answer wins.
+    found.set(port, (found.get(port) ?? true) && isLoopback(address));
+  }
+
+  return [...found.entries()]
+    .map(([port, loopback]) => ({ port, loopback }))
+    .sort((a, b) => a.port - b.port);
+}
+
+/**
+ * The ports a workspace has shared, read back from the proxy's own config.
+ *
+ * Kept on the Deployment as an annotation rather than in a store of this product's own: the
+ * shares are what the proxy is running, so the proxy is where they are recorded, and a share that
+ * exists in a list but not in nginx would be a link that 502s.
+ */
+const SHARE_ANNOTATION = 'dev.rancher.io/shares';
+
+export async function listWorkspaceShares(name: string): Promise<DevShare[]> {
+  const namespace = workspaceNamespace(name);
+  const url = `${ BASE }/v1/apps.deployments/${ namespace }/${ shareName(namespace) }`;
+  const deployment = await devFetch(url).catch(() => null);
+
+  try {
+    return JSON.parse(deployment?.metadata?.annotations?.[SHARE_ANNOTATION] || '[]');
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Share a workspace port, or stop sharing it.
+ *
+ * One function for both because they are the same write: the list of shares is rendered into an
+ * nginx config, a password file and a Service, and every one of those is replaced wholesale each
+ * time. Sharing the third port and unsharing the second are the same operation on a different
+ * list, which is what keeps the four things from drifting apart.
+ */
+export async function setWorkspaceShares(name: string, shares: DevShare[]): Promise<void> {
+  const namespace = workspaceNamespace(name);
+  const proxy = shareName(namespace);
+  const labels = { app: proxy, [LABEL_WORKSPACE]: name };
+
+  await ensureWorkspaceRbac(name);
+
+  // Nothing shared: the proxy is scaled away rather than deleted, so unsharing and sharing again
+  // does not have to wait for an image pull, and so its Service keeps the node ports it was given.
+  if (!shares.length) {
+    const url = `${ BASE }/v1/apps.deployments/${ namespace }/${ proxy }`;
+    const existing = await devFetch(url).catch(() => null);
+
+    if (existing) {
+      existing.spec.replicas = 0;
+      existing.metadata.annotations = { ...(existing.metadata.annotations || {}), [SHARE_ANNOTATION]: '[]' };
+      await devFetch(url, { method: 'PUT', body: JSON.stringify(existing) });
+    }
+
+    return;
+  }
+
+  await upsert('configmaps', namespace, proxy, {
+    apiVersion: 'v1',
+    kind:       'ConfigMap',
+    metadata:   { namespace, name: proxy, labels },
+    data:       { 'nginx.conf': nginxConf(namespace, name, shares) },
+  });
+
+  await upsert('secrets', namespace, proxy, {
+    apiVersion: 'v1',
+    kind:       'Secret',
+    metadata:   { namespace, name: proxy, labels },
+    type:       'Opaque',
+    data:       { htpasswd: encodeSecret(htpasswd(shares)) },
+  }, (secret) => {
+    secret.data = { htpasswd: encodeSecret(htpasswd(shares)) };
+  });
+
+  await upsert('services', namespace, proxy, {
+    apiVersion: 'v1',
+    kind:       'Service',
+    metadata:   { namespace, name: proxy, labels },
+    spec:       {
+      type:     'NodePort',
+      selector: { app: proxy },
+      ports:    shares.map((share) => ({
+        name: `p${ share.listen }`, port: share.listen, targetPort: share.listen,
+      })),
+    },
+  }, (service) => {
+    // The existing entries are kept rather than replaced, so a node port the cluster already
+    // assigned to a share is not given up and every link already sent out keeps working.
+    const before = service.spec?.ports || [];
+
+    service.spec.type = 'NodePort';
+    service.spec.ports = shares.map((share) => {
+      const kept = before.find((entry: Json) => entry.port === share.listen);
+
+      return kept || { name: `p${ share.listen }`, port: share.listen, targetPort: share.listen };
+    });
+  });
+
+  await upsert('apps.deployments', namespace, proxy, {
+    apiVersion: 'apps/v1',
+    kind:       'Deployment',
+    metadata:   {
+      namespace, name: proxy, labels, annotations: { [SHARE_ANNOTATION]: JSON.stringify(shares) }
+    },
+    spec: {
+      replicas: 1,
+      selector: { matchLabels: { app: proxy } },
+      strategy: { type: 'Recreate' },
+      template: { metadata: { labels }, spec: sharePodSpec(namespace, WORKSPACE_SERVICE_ACCOUNT) },
+    },
+  }, (deployment) => {
+    deployment.spec.replicas = 1;
+    deployment.spec.template.spec = sharePodSpec(namespace, WORKSPACE_SERVICE_ACCOUNT);
+    deployment.metadata.annotations = {
+      ...(deployment.metadata.annotations || {}), [SHARE_ANNOTATION]: JSON.stringify(shares),
+    };
+
+    // nginx reads its config once, at start, so a config that changed under a running pod is a
+    // proxy still serving the old set of ports. This is Kubernetes' own `rollout restart`.
+    const meta = deployment.spec.template.metadata;
+
+    meta.annotations = { ...(meta.annotations || {}), 'dev.rancher.io/restarted-at': new Date().toISOString() };
+  });
+}
+
+/** Where a share answers, once the cluster has assigned its Service a node port. */
+export async function shareNodePorts(name: string): Promise<Record<number, number>> {
+  const namespace = workspaceNamespace(name);
+  const service = await devFetch(`${ BASE }/v1/services/${ namespace }/${ shareName(namespace) }`).catch(() => null);
+  const out: Record<number, number> = {};
+
+  for (const entry of service?.spec?.ports || []) {
+    if (entry.nodePort) {
+      out[entry.port] = entry.nodePort;
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Create it, or bring the one that is there up to date.
+ *
+ * `ensure` next door deliberately leaves an existing object alone, which is right for the things
+ * it makes once and wrong for every object here: a share's config is rewritten every time the set
+ * of shares changes. The mutate callback is how a caller keeps the parts of an existing object
+ * that Kubernetes assigned rather than this code, which is what stops a node port moving under a
+ * link somebody has already been given.
+ */
+async function upsert(type: string, namespace: string, name: string, body: Json, mutate?: (existing: Json) => void): Promise<void> {
+  const url = `${ BASE }/v1/${ type }/${ namespace }/${ name }`;
+  const existing = await devFetch(url).catch(() => null);
+
+  if (!existing) {
+    await devFetch(`${ BASE }/v1/${ type }`, { method: 'POST', body: JSON.stringify(body) });
+
+    return;
+  }
+
+  if (mutate) {
+    mutate(existing);
+  } else {
+    existing.data = body.data;
+  }
+
+  await devFetch(url, { method: 'PUT', body: JSON.stringify(existing) });
+}
+
+/**
+ * The node ports the cluster has already given out.
+ *
+ * Asked so that a suggestion is a port that will actually be accepted rather than one the
+ * apiserver rejects a moment later. It reads every Service the person can see, which for an
+ * admin is all of them and for anyone else is a subset - a suggestion built from a subset is
+ * still better than one built from nothing, and the cluster has the final say either way.
+ */
+export async function usedNodePorts(): Promise<number[]> {
+  const services = await devFetch(`${ BASE }/v1/services`).catch(() => null);
+
+  return (services?.data || [])
+    .flatMap((service: Json) => service.spec?.ports || [])
+    .map((port: Json) => port.nodePort)
+    .filter((port: number) => !!port);
+}
+
+/** The range Kubernetes assigns node ports from, and refuses anything outside. */
+export const NODE_PORT_RANGE = { first: 30000, last: 32767 };
+
+/**
+ * A published port for a local one: free, and the same answer every time it is asked.
+ *
+ * Derived from the local port rather than taken from the bottom of the range, so a workspace's
+ * 8005 lands somewhere memorable and lands there again after it is unforwarded and forwarded.
+ * Collisions walk forward from there.
+ */
+export function suggestNodePort(port: number, used: number[]): number {
+  const span = NODE_PORT_RANGE.last - NODE_PORT_RANGE.first + 1;
+  const taken = new Set(used);
+
+  for (let i = 0; i < span; i++) {
+    const candidate = NODE_PORT_RANGE.first + ((port + i) % span);
+
+    if (!taken.has(candidate)) {
+      return candidate;
+    }
+  }
+
+  // Every port in the range is spoken for, which is not a thing that happens in a cluster with
+  // room for another workspace. Nothing suggested is better than a number that cannot work.
+  return 0;
+}
+
 /** One entry in a workspace's Service. */
 export interface DevPort {
   name: string;
   port: number;
+  /** The published port, or 0 where the Service does not publish this one. */
+  nodePort?: number;
 }
 
 /** Kubernetes' own limit on a Service port name, which is a DNS label of at most 15 characters. */
@@ -2233,8 +3511,11 @@ export async function listWorkspacePorts(name: string): Promise<DevPort[]> {
   const service = (services?.data || []).find((svc: Json) => svc.metadata?.name === namespace);
 
   return (service?.spec?.ports || []).map((port: Json) => ({
-    name: port.name || '',
-    port: port.port,
+    name:     port.name || '',
+    port:     port.port,
+    // What it is published on, when the Service is a NodePort. This is the public half of the
+    // mapping the Ports tab draws.
+    nodePort: port.nodePort || 0,
   }));
 }
 
@@ -2285,13 +3566,22 @@ async function editWorkspacePorts(name: string, edit: (ports: Json[]) => Json[])
   await devFetch(url, { method: 'PUT', body: JSON.stringify(service) });
 }
 
-export function addWorkspacePort(name: string, port: number): Promise<void> {
+/**
+ * Add a port, and optionally say which published one it should answer on.
+ *
+ * The harness maps a public port to a local one, and this is that mapping in Kubernetes: the
+ * local port is the one the workspace is listening on, and the public one is the node port. A
+ * node port left out is chosen by the cluster from its own range, which is the ordinary case; a
+ * node port asked for is one somebody wants to keep stable across rebuilds, and the cluster
+ * refuses it if it is outside the range or already taken.
+ */
+export function addWorkspacePort(name: string, port: number, nodePort?: number): Promise<void> {
   return editWorkspacePorts(name, (ports) => [
     ...ports,
     // targetPort is the number rather than a named port: a name only exists if the
     // Deployment's container declared it, and a port added after the fact has not been.
     {
-      name: portName(port), port, targetPort: port, protocol: 'TCP'
+      name: portName(port), port, targetPort: port, protocol: 'TCP', ...(nodePort ? { nodePort } : {}),
     },
   ]);
 }
@@ -2327,9 +3617,44 @@ export function workspaceProxyUrl(name: string, port: number, scheme = 'http'): 
  * Only the proxy's own failures count as not serving. A 404 or a 500 from the workspace is the
  * workspace answering, which is something to show rather than something to wait through.
  */
-export async function workspaceServing(name: string, port: number, scheme = 'http'): Promise<boolean> {
+export function workspaceServing(name: string, port: number, scheme = 'http'): Promise<boolean> {
+  return proxyServing(workspaceProxyUrl(name, port, scheme));
+}
+
+/**
+ * The same question about a sidecar, which has the same two answers for the same reasons.
+ *
+ * A running pod is not a served page: the browser sidecar's Deployment is Available a second or
+ * two before its UI answers, and framing it in that window shows an apiserver 503 that nothing
+ * afterwards clears, because an iframe on another origin's path cannot be told to reload.
+ */
+export function sidecarServing(workspace: string, sidecar: DevSidecar): Promise<boolean> {
+  return proxyServing(sidecarProxyUrl(workspace, sidecar));
+}
+
+/**
+ * Whether a sidecar is up and answering: both halves, because neither alone is the answer.
+ *
+ * The Deployment is asked about first, and it is not redundant. A sidecar that has never been
+ * started has no Service either, and the apiserver's proxy answers a missing Service with a 404,
+ * which serving deliberately counts as "answering" — a 404 from a running app is the app talking.
+ * So without this, a browser nobody has started would read as up.
+ */
+export async function sidecarReady(workspace: string, sidecar: DevSidecar): Promise<boolean> {
+  const namespace = workspaceNamespace(workspace);
+  const url = `${ BASE }/v1/apps.deployments/${ namespace }/${ sidecarName(workspace, sidecar.id) }`;
+  const deployment = await devFetch(url).catch(() => null);
+
+  if (!deployment?.status?.readyReplicas) {
+    return false;
+  }
+
+  return sidecarServing(workspace, sidecar);
+}
+
+async function proxyServing(url: string): Promise<boolean> {
   try {
-    const resp = await fetch(workspaceProxyUrl(name, port, scheme), { cache: 'no-store' });
+    const resp = await fetch(url, { cache: 'no-store' });
 
     return ![502, 503, 504].includes(resp.status);
   } catch {
@@ -2346,14 +3671,14 @@ export async function workspaceServing(name: string, port: number, scheme = 'htt
  * The protocol is `base64.channel.k8s.io`: every frame is a channel digit (0 stdin, 1 stdout,
  * 2 stderr, 3 error, 4 resize) followed by base64.
  */
-export function podExecUrl(namespace: string, pod: string, container: string, command: string[]): string {
+export function podExecUrl(namespace: string, pod: string, container: string, command: string[], tty = true): string {
   const origin = window.location.origin.replace(/^http/, 'ws');
   const params = new URLSearchParams({
     container,
-    stdin:  '1',
+    stdin:  tty ? '1' : '0',
     stdout: '1',
     stderr: '1',
-    tty:    '1',
+    tty:    tty ? '1' : '0',
   });
 
   // Repeated, not comma-joined: this is argv.
@@ -2365,21 +3690,146 @@ export function podExecUrl(namespace: string, pod: string, container: string, co
 }
 
 /**
- * What a workspace's terminal runs.
+ * Run one command in a pod and wait for it to finish, with nobody watching the output.
  *
- * It asks for bash and settles for sh, because the templates are not all the same
- * distribution and a hardcoded /bin/bash would fail on busybox with an error the terminal can
- * only show as a closed connection. There is no tmux in here, which is why a workspace's shell
- * does not survive being closed: that is a property of the image, and it is what the workspace
- * templates will fix.
+ * The same exec subresource the terminals use, without the TTY and without a component around
+ * it: what this is for is the housekeeping a terminal cannot do for itself, which today is
+ * killing the tmux session behind a conversation that has been deleted.
+ *
+ * It resolves rather than rejects on failure. Every caller is tidying up after something the
+ * person has already done, and there is nothing useful to say to them about a pod that has gone
+ * away in the meantime — the session went with it.
  */
-export const WORKSPACE_SHELL_COMMAND = [
-  '/bin/sh',
-  '-c',
-  'TERM=xterm-256color; export TERM; [ -x /bin/bash ] && exec /bin/bash || exec /bin/sh',
-];
+export function podExecOnce(namespace: string, pod: string, container: string, command: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    let out = '';
 
-/** WebSocket URL for a shell in a workspace's pod. */
+    try {
+      const socket = new WebSocket(podExecUrl(namespace, pod, container, command, false), 'base64.channel.k8s.io');
+
+      // Every frame is a channel digit then base64. 1 is stdout, which is the only one a caller
+      // has asked about so far; 2 is stderr and 3 is the apiserver's own status, and a command
+      // that writes to either has nothing to say to a caller that only wanted its output.
+      socket.onmessage = (event) => {
+        const frame = String(event.data || '');
+
+        if (frame.startsWith('1')) {
+          try {
+            out += atob(frame.slice(1));
+          } catch { /* a frame that is not base64 is not output */ }
+        }
+      };
+
+      socket.onclose = () => resolve(out);
+      socket.onerror = () => resolve(out);
+    } catch {
+      resolve(out);
+    }
+  });
+}
+
+/**
+ * What a workspace's conversation runs, which is the same thing the dev server pod's tabs run.
+ *
+ * It was a bare shell, and that was not a design: nothing installed claude into a workspace and
+ * nothing shared a login with one, so the tab landed in `sh` and said so. Both halves are now
+ * the workspace's own — the scripts are mounted at /seed (ensureWorkspaceTerminal) and the
+ * template installs claude on boot — so this is `shell.sh`, exactly as the dev pod calls it:
+ * tmux, so a conversation outlives the browser tab, then claude in a loop.
+ *
+ * The three arguments are the session, the directory, and the home:
+ *
+ *   - the session names the tmux session, so conversation 2 is a different pane from
+ *     conversation 1 and both survive a page reload.
+ *   - the directory is the checkout, because that is the thing a workspace exists to work on.
+ *     The dev pod gives each of its global terminals a directory of its own instead, since
+ *     claude keys its history by working directory and those sessions have nothing in common;
+ *     here they do, and a second conversation continuing the first one's history in the same
+ *     repository is the behaviour to want rather than one to design around.
+ *   - the home is on the workspace's own hostPath, so a login survives a restart.
+ */
+export function workspaceTerminalCommand(session: string | number): string[] {
+  return ['/bin/sh', `${ WORKSPACE_TERMINAL_MOUNT }/shell.sh`, workspaceSession(session), WORKSPACE_WORKDIR, WORKSPACE_HOME];
+}
+
+/**
+ * A command, run as the user the workspace's conversations belong to.
+ *
+ * The exec subresource runs as the container's user, which is root, and tmux is not a service:
+ * its server is a socket under /tmp owned by whoever started it, and the panes were started as
+ * the node user (see shell.sh). So `tmux ls` as root finds no server and answers that a workspace
+ * with two conversations in it has none. The same drop shell.sh does, for the same reason.
+ */
+function asWorkspaceUser(command: string): string[] {
+  return ['/bin/sh', '-c', `if [ "$(id -u)" = 0 ]; then setpriv --reuid=1000 --regid=1000 --init-groups /bin/sh -c '${ command }'; else /bin/sh -c '${ command }'; fi`];
+}
+
+/** The tmux session one conversation is, named the same way in both places that need it. */
+function workspaceSession(session: string | number): string {
+  return `ws-${ session }`;
+}
+
+/**
+ * The conversations a workspace actually has, which is what its pod says rather than what this
+ * page last remembered.
+ *
+ * A conversation is a tmux session, so it outlives the browser tab that made it. The list used to
+ * be component state that started at one row on every load, which meant a reload lost every
+ * conversation but the first: they carried on in the pod with claude in them, invisible, and the
+ * delete on a row had nothing to act on. So the pod is asked.
+ *
+ * Nothing yet, a pod with no tmux, and a pod that has gone away all answer the same way here, and
+ * the caller shows one conversation, which is what a workspace nobody has opened has.
+ */
+export async function listWorkspaceConversations(name: string): Promise<number[]> {
+  const namespace = workspaceNamespace(name);
+  const pod = await workspacePod(name);
+
+  if (!pod) {
+    return [];
+  }
+
+  const out = await podExecOnce(namespace, pod, WORKSPACE_CONTAINER, asWorkspaceUser(
+    'tmux ls -F "#{session_name}" 2>/dev/null || true',
+  ));
+
+  // `mc-ws-2` is conversation 2. The prefix is shell.sh's (`mc-$SESSION`) and the `ws-` is
+  // workspaceSession's, so a global terminal's session in some other pod could never be read as
+  // one of these even if it were listed here.
+  const numbers = out.split('\n')
+    .map((line) => /^mc-ws-(\d+)$/.exec(line.trim())?.[1])
+    .filter((found): found is string => !!found)
+    .map(Number);
+
+  return [...new Set(numbers)].sort((a, b) => a - b);
+}
+
+/**
+ * End a conversation in the pod, not only in the browser.
+ *
+ * Closing the pane closes a socket, and tmux is the whole reason that is not enough: the session
+ * carries on in the pod with claude in it, and creating a conversation with the same number
+ * later would reattach to it. So a deleted conversation is one whose session is killed, which is
+ * what makes the delete on its row mean what the delete on a workspace's row means.
+ */
+export async function deleteWorkspaceConversation(name: string, session: string | number): Promise<void> {
+  const namespace = workspaceNamespace(name);
+  // The workspace's own pod, not one of its sidecars: they are in the same namespace and carry
+  // the same label, and none of them has the session to kill. See findPod.
+  const pod = await workspacePod(name);
+
+  if (!pod) {
+    return;
+  }
+
+  // `|| true` so a session that was never started, or a pod with no tmux in it yet, is a command
+  // that succeeds at doing nothing rather than an error nobody is listening for.
+  await podExecOnce(namespace, pod, WORKSPACE_CONTAINER, asWorkspaceUser(
+    `tmux kill-session -t mc-${ workspaceSession(session) } 2>/dev/null || true`,
+  ));
+}
+
+/** WebSocket URL for a conversation in a workspace's pod. */
 export function workspaceShellUrl(name: string, pod: string): string {
-  return podExecUrl(workspaceNamespace(name), pod, WORKSPACE_CONTAINER, WORKSPACE_SHELL_COMMAND);
+  return podExecUrl(workspaceNamespace(name), pod, WORKSPACE_CONTAINER, workspaceTerminalCommand(1));
 }

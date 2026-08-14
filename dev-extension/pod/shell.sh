@@ -1,7 +1,8 @@
 #!/bin/sh
 # Entrypoint for a terminal tab. The extension's terminal component runs this
 # over the Kubernetes exec subresource, with the tab's session id as $1 and,
-# optionally, the directory the pane should start in as $2.
+# optionally, the directory the pane should start in as $2 and the home
+# directory claude should keep its state in as $3.
 #
 # Everything the tab runs comes out of /seed rather than the tree, so a tab
 # always starts the scripts the extension last wrote, without a pod restart.
@@ -27,9 +28,33 @@ SESSION=${1:-main}
 # nothing.
 WORKDIR=${2:-/app/pkg/dev-extension}
 
-HOME_DIR=/app/.home
+# Where claude's login and settings live, which has to be on whatever storage
+# outlives the pod or every restart is another /login. It is an argument because
+# this script runs in two kinds of pod: the dev server's, whose durable
+# directory is /app, and a workspace's, whose is /workspace.
+HOME_DIR=${3:-/app/.home}
 
-/bin/sh /seed/terminal-tools.sh
+# Made here as well as by whatever booted the pod, because everything below
+# writes into it and a missing one is a login that cannot be saved. Cheap, and
+# a no-op on the second tab.
+if [ ! -d "$HOME_DIR" ]; then
+  mkdir -p "$HOME_DIR"
+
+  if [ "$(id -u)" = 0 ]; then
+    chown node:node "$HOME_DIR"
+  fi
+fi
+
+# A prompt this conversation was opened with, if something queued one. It is a file rather
+# than an argument because whoever queues it is not the thing that starts the pane: a page
+# writes it into the pod and the pane picks it up whenever it next starts. Beside the home
+# directory, so it is on the same storage and outlives a pod restart the way a login does.
+QUEUE_DIR="$(dirname "$HOME_DIR")/.queue"
+MC_QUEUE="$QUEUE_DIR/$SESSION"
+
+export MC_QUEUE
+
+HOME_DIR="$HOME_DIR" TRUST_DIRS="$WORKDIR" /bin/sh /seed/terminal-tools.sh
 
 # A session directory has to exist before tmux is told to start in it, and it has
 # to belong to the node user, since everything in the pane is that user and
@@ -66,8 +91,10 @@ else
   env "HOME=$HOME_DIR" node /seed/claude-credentials.mjs pull || true
 fi
 
+# tmux does not pass this script's environment into a session it is attaching to, only into one
+# it creates, so the queue file is given on the command line of the pane's own script instead.
 set -- tmux -f /seed/tmux.conf new-session -A -s "mc-$SESSION" -c "$WORKDIR" \
-  "/bin/bash /seed/claude-session.sh"
+  "/bin/bash /seed/claude-session.sh '$MC_QUEUE'"
 
 # The exec subresource runs as the container's user, which is root, whatever the
 # dev server dropped itself to. Everything in the pane has to be the node user

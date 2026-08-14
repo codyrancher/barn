@@ -1,26 +1,43 @@
 <script>
 // A workspace's conversations: a list down the left, the open one filling the rest.
 //
-// The harness gives a project many conversations rather than one terminal, with New
-// conversation at the foot of the list, and this is that. A conversation is a shell in the
-// workspace's pod, numbered by the same function the drawer's terminals are numbered with, so
-// the two cannot come to disagree about what the numbers mean.
+// The harness gives a project many conversations rather than one terminal, and this is that. A
+// conversation is claude in the workspace's own pod, numbered by the same function the drawer's
+// terminals are numbered with, so the two cannot come to disagree about what the numbers mean.
 //
-// Every conversation that has been opened stays mounted, hidden rather than destroyed, which
-// is what makes switching between them keep both alive. That matters more here than in the
-// drawer: the workspace images have no tmux in them, so a conversation exists only as long as
-// its socket does. The panes say so rather than implying a persistence they do not have.
+// It is claude in every workspace and there is no other kind. It used to be a bare shell with a
+// paragraph above it explaining that it was one; what was missing was never the install, which is
+// seconds, but the two things around it, and both are now the workspace's own: the scripts are
+// mounted at /seed (see ensureWorkspaceTerminal) and the template hands the tree to an ordinary
+// user and installs the CLI on boot.
+//
+// Every conversation that has been opened stays mounted, hidden rather than destroyed, so
+// switching between them keeps both alive. Closing one is what the row's delete does, and it is
+// only the browser's end: the pane is a tmux session in the pod, so a conversation outlives the
+// page and reopening the tab lands back in it.
 import { RcButton } from '@components/RcButton';
 import { Banner } from '@components/Banner';
 import DevTerminal from './DevTerminal.vue';
+import DevList from './DevList.vue';
 import { nextNumber } from '../terminals';
-import { LABEL_WORKSPACE, WORKSPACE_CONTAINER, WORKSPACE_SHELL_COMMAND } from '../api';
+import {
+  LABEL_WORKSPACE, WORKSPACE_CONTAINER, workspaceTerminalCommand, deleteWorkspaceConversation,
+  listWorkspaceConversations
+} from '../api';
+
+/**
+ * A pane's own connection state, as one of Rancher's, so the row's dot is the same dot a
+ * workspace's row has. DevList knows about states, not about sockets.
+ */
+const ROW_STATE = {
+  open: 'running', connecting: 'starting', waiting: 'starting', closed: 'stopped'
+};
 
 export default {
   name: 'WorkspaceConversations',
 
   components: {
-    RcButton, Banner, DevTerminal
+    RcButton, Banner, DevTerminal, DevList
   },
 
   emits: ['start'],
@@ -29,13 +46,6 @@ export default {
     workspace: {
       type:     Object,
       required: true,
-    },
-
-    // What the pane lands in, from the template: 'claude' or 'shell'. Only the wording depends
-    // on it, since nothing installs the claude CLI in a workspace yet.
-    kind: {
-      type:    String,
-      default: 'shell',
     },
 
     // The last line the container printed, while it is still coming up. The page fetches it,
@@ -53,12 +63,18 @@ export default {
 
   data() {
     return {
-      // The numbers that have been opened, in order, and which one is showing.
+      // The numbers that have been opened, in order, and which one is showing. Seeded from the
+      // pod on the way up, since a conversation is a tmux session that was probably already
+      // there before this page was. See adopt.
       conversations: [1],
       current:       1,
       // number -> the pane's own connection state, for the dot on its row.
       states:        {},
     };
+  },
+
+  async fetch() {
+    await this.adopt();
   },
 
   computed: {
@@ -94,28 +110,79 @@ export default {
       return WORKSPACE_CONTAINER;
     },
 
-    command() {
-      return WORKSPACE_SHELL_COMMAND;
-    },
-
     rows() {
       return this.conversations.map((number) => ({
-        number,
+        key:   number,
         label: `chat-${ number }`,
-        // Only a pane with its socket open is live. Anything else (waiting for the pod,
-        // connecting, closed) is not, and the dot says so rather than being decoration.
-        live:  this.states[number] === 'open',
+        // The pane's own socket, as a state, so the dot means what it means everywhere else.
+        state: ROW_STATE[this.states[number]] || 'stopped',
       }));
     },
   },
 
   methods: {
+    /**
+     * Take on whatever conversations the workspace already has.
+     *
+     * Once, on the way up, rather than on a poll: after this the page is the thing creating and
+     * deleting them, and a poll would be asking the pod to confirm what this component just did.
+     */
+    async adopt() {
+      const existing = await listWorkspaceConversations(this.workspace.name).catch(() => []);
+
+      if (!existing.length) {
+        return;
+      }
+
+      this.conversations = existing;
+      this.current = existing[0];
+    },
+
     /** The next number, from the same function the drawer's terminals are numbered with. */
     newConversation() {
       const number = nextNumber(this.conversations);
 
       this.conversations = [...this.conversations, number];
       this.current = number;
+    },
+
+/**
+     * Delete a conversation, in the pod as well as here.
+     *
+     * Unmounting the pane only closes a socket. The conversation is a tmux session in the
+     * workspace, so it would carry on without it, and since numbers are reused a later
+     * conversation with the same number would reattach to it — a delete that turns out to have
+     * been a hide. See deleteWorkspaceConversation.
+     *
+     * The last one is not deletable: an empty column with no pane beside it is a tab with
+     * nothing in it, and New conversation would be the only thing on the page.
+     */
+    closeConversation(number) {
+      if (this.conversations.length < 2) {
+        return;
+      }
+
+      const remaining = this.conversations.filter((entry) => entry !== number);
+
+      this.conversations = remaining;
+
+      if (this.current === number) {
+        this.current = remaining[remaining.length - 1];
+      }
+
+      const states = { ...this.states };
+
+      delete states[number];
+      this.states = states;
+
+      // After the pane is gone, so the socket it holds is not the thing being killed underneath
+      // it, and unawaited: the column has already moved on and there is nothing to report.
+      deleteWorkspaceConversation(this.workspace.name, number);
+    },
+
+    /** What one conversation runs, which is its own tmux session in the workspace's pod. */
+    commandFor(number) {
+      return workspaceTerminalCommand(number);
     },
 
     onState(number, state) {
@@ -127,37 +194,28 @@ export default {
 
 <template>
   <div class="workspace-conversations">
-    <nav class="workspace-conversations__list">
-      <ul>
-        <li
-          v-for="row in rows"
-          :key="row.number"
-        >
-          <button
-            type="button"
-            :class="{ 'workspace-conversations__current': row.number === current }"
-            @click="current = row.number"
-          >
-            <i
-              class="icon icon-dot"
-              :class="row.live ? 'text-success' : 'text-muted'"
-            />
-            {{ row.label }}
-          </button>
-        </li>
-      </ul>
-      <!--
-        Pinned to the foot of the list, where the harness puts it, so it stays put as the list
-        grows rather than walking down the column.
-      -->
-      <RcButton
-        variant="secondary"
-        left-icon="plus"
-        @click="newConversation"
-      >
-        New conversation
-      </RcButton>
-    </nav>
+    <!--
+      The same column the sidebar's workspaces are, and for the same reasons: a conversation has
+      a state worth a dot, is created from the heading, and can be closed from its own row.
+    -->
+    <!--
+      No heading text. The tab above this says Conversations, and a column that repeats its own
+      tab's name is a line of chrome saying nothing. The row itself stays, because it is where
+      the control that makes another one lives.
+    -->
+    <DevList
+      class="workspace-conversations__list"
+      label=""
+      icon="icon-comment"
+      :rows="rows"
+      :current="current"
+      create-label="New conversation"
+      empty="No conversations"
+      deletable
+      @select="current = $event"
+      @create="newConversation"
+      @delete="closeConversation"
+    />
 
     <div class="workspace-conversations__pane">
       <Banner
@@ -203,30 +261,17 @@ export default {
         </p>
       </Banner>
 
-      <p
-        v-if="ready"
-        class="workspace-conversations__note"
-      >
-        <template v-if="kind === 'claude'">
-          A claude session in the workspace's pod, over the Kubernetes exec subresource.
-        </template>
-        <template v-else>
-          A shell, not claude: nothing installs the claude CLI into a workspace yet, so the tab
-          says what it is rather than what it is meant to be. Each conversation is its own
-          shell, and lasts as long as this page is open, since there is no tmux in the image to
-          leave it running.
-        </template>
-      </p>
       <DevTerminal
         v-for="row in (ready ? rows : [])"
-        v-show="row.number === current"
-        :key="row.number"
+        v-show="row.key === current"
+        :key="row.key"
         class="workspace-conversations__terminal"
         :namespace="workspace.namespace"
         :labels="podLabels"
+        :own="workspace.name"
         :container="container"
-        :command="command"
-        @state="onState(row.number, $event)"
+        :command="commandFor(row.key)"
+        @state="onState(row.key, $event)"
       />
     </div>
   </div>
@@ -236,47 +281,20 @@ export default {
   .workspace-conversations {
     display:    flex;
     flex:       1 1 auto;
-    gap:        20px;
     min-height: 0;
+    // No gap: the column's own right border is the divider between the two, and a gap as well
+    // put a strip of page between that line and the pane's, which reads as two edges rather
+    // than one. The pane's padding is what keeps the terminal off it.
 
+    // The column is DevList's, so everything about a row is its stylesheet's. What is left here
+    // is the column's place on the tab: a fixed rail down the left, scrolling on its own when
+    // there are more conversations than fit.
     &__list {
-      display:        flex;
-      flex-direction: column;
-      flex:           0 0 180px;
-      border-right:   1px solid var(--border);
-      padding-right:  10px;
-
-      ul {
-        flex:       1 1 auto;
-        margin:     0 0 10px 0;
-        padding:    0;
-        list-style: none;
-      }
-
-      button {
-        display:       block;
-        width:         100%;
-        padding:       6px 10px;
-        border:        none;
-        border-radius: var(--border-radius);
-        background:    transparent;
-        color:         var(--body-text);
-        text-align:    left;
-        cursor:        pointer;
-
-        &:hover {
-          background: var(--nav-hover, var(--accent-btn));
-        }
-      }
-
-      .icon-dot {
-        margin-right: 6px;
-        font-size:    10px;
-      }
-    }
-
-    &__current {
-      background: var(--nav-active, var(--accent-btn));
+      // Wide enough for the heading and its create control side by side, which 180px was not:
+      // the word CONVERSATIONS ran under the plus.
+      flex:         0 0 210px;
+      overflow-y:   auto;
+      border-right: 1px solid var(--border);
     }
 
     &__pane {
@@ -309,9 +327,17 @@ export default {
       text-overflow: ellipsis;
     }
 
+    // Flush: the column's right border and the tab strip's bottom border are already the two
+    // edges this pane has, so the terminal's own frame and any padding around it would be a
+    // second edge a few pixels inside the first. It is the whole of the pane here, the way the
+    // Browser tab's frame is the whole of that one.
+    // The class lands on DevTerminal's own root element, which is where its frame is drawn, so
+    // this overrides it rather than reaching into it.
     &__terminal {
-      flex:       1 1 auto;
-      min-height: 320px;
+      flex:          1 1 auto;
+      min-height:    320px;
+      border:        0;
+      border-radius: 0;
     }
   }
 </style>

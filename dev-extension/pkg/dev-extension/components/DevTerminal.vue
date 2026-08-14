@@ -62,6 +62,19 @@ export default {
       required: true,
     },
 
+    /**
+     * The workspace whose own pod this is, when it is a workspace's.
+     *
+     * A workspace's sidecars live in its namespace and carry its label, so the labels alone are
+     * not enough to say which pod is the workspace: without this a conversation opens in
+     * whichever of them the collection happens to list first, and asks for a container called
+     * `workspace` that a browser sidecar does not have. See findPod.
+     */
+    own: {
+      type:    String,
+      default: '',
+    },
+
     container: {
       type:     String,
       required: true,
@@ -240,7 +253,7 @@ export default {
       this.deciding = false;
 
       while (this.isCurrent(generation)) {
-        const pod = await findPod(this.namespace, this.labels).catch(() => null);
+        const pod = await findPod(this.namespace, this.labels, this.own).catch(() => null);
 
         if (!this.isCurrent(generation)) {
           return;
@@ -348,7 +361,7 @@ export default {
         return;
       }
 
-      const current = await findPod(this.namespace, this.labels).catch(() => null);
+      const current = await findPod(this.namespace, this.labels, this.own).catch(() => null);
 
       if (!this.isCurrent(generation)) {
         return;

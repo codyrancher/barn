@@ -9,7 +9,9 @@ import LabeledSelect from '@shell/components/form/LabeledSelect';
 import { LabeledInput } from '@components/Form/LabeledInput';
 import { Banner } from '@components/Banner';
 import { RcButton } from '@components/RcButton';
-import { createWorkspace, workspaceNameError, workspaceNamespace } from '../api';
+import {
+  createWorkspace, workspaceNameError, workspaceNamespace, listClusters, readableBytes
+} from '../api';
 import { TEMPLATES, templateById } from '../templates';
 import {
   DEV_PRODUCT, BLANK_CLUSTER, WORKSPACES_ROUTE, WORKSPACE_ROUTE
@@ -22,6 +24,21 @@ export default {
     AsyncButton, LabeledSelect, LabeledInput, Banner, RcButton
   },
 
+  async fetch() {
+    this.clusters = await listClusters().catch(() => []);
+
+    // The one Rancher itself runs in, where a workspace has always gone, unless it is not on the
+    // list: a person with access to one downstream cluster and not to local should not have a
+    // form that opens on a cluster they cannot use.
+    // The sidebar links here with a cluster already chosen, the way the Templates page links
+    // here with a template. An unknown one falls back rather than leaving the form pointed at a
+    // cluster that is not on the list.
+    const asked = this.$route.query.cluster;
+    const known = (id) => this.clusters.some((entry) => entry.id === id) && id;
+
+    this.cluster = known(asked) || known('local') || this.clusters[0]?.id || 'local';
+  },
+
   data() {
     // The Templates page links here with a template already chosen; an unknown one in the
     // query falls back rather than leaving the select empty and the form unsubmittable.
@@ -29,6 +46,9 @@ export default {
 
     return {
       name:     '',
+      // The clusters a workspace could be hosted on, and the one it will be.
+      clusters: [],
+      cluster:  'local',
       template: templateById(asked)?.id || TEMPLATES[0].id,
       error:    '',
       // The name is only complained about once it has been typed in and left alone, so the
@@ -40,6 +60,19 @@ export default {
   },
 
   computed: {
+    /**
+     * The clusters, each with what is left on it, which is what the select shows.
+     *
+     * MEM and DSK rather than the words: the label sits in a select a third of a form wide, and
+     * a cluster whose numbers are truncated is a cluster you cannot choose between.
+     */
+    clusterOptions() {
+      return this.clusters.map((entry) => ({
+        value: entry.id,
+        label: `${ entry.name } (MEM ${ readableBytes(entry.memoryFree) }, DSK ${ readableBytes(entry.diskFree) })`,
+      }));
+    },
+
     nameError() {
       return workspaceNameError(this.name);
     },
@@ -78,7 +111,7 @@ export default {
       }
 
       try {
-        await createWorkspace(this.name, this.template);
+        await createWorkspace(this.name, this.template, this.cluster);
         // Straight to the workspace rather than back to the list: the thing worth watching
         // next is the pod coming up, and that is on the detail page.
         this.$router.push({
@@ -99,10 +132,6 @@ export default {
   <div class="dev-create">
     <header>
       <h1>Create Workspace</h1>
-      <p class="subheader">
-        A workspace is a namespace, a Deployment and a Service. The template decides what runs
-        in it.
-      </p>
     </header>
 
     <Banner
@@ -125,6 +154,20 @@ export default {
         :options="options"
         :clearable="false"
       />
+      <!--
+        Which cluster hosts it. The free memory and disk are beside each name because that is the
+        question somebody is actually answering: not which cluster, but which one has room for a
+        checkout, an install and a compile.
+      -->
+      <LabeledSelect
+        v-model:value="cluster"
+        label="Cluster"
+        :options="clusterOptions"
+        option-label="label"
+        option-key="value"
+        :reduce="(entry) => entry.value"
+        :clearable="false"
+      />
     </div>
 
     <Banner
@@ -140,15 +183,9 @@ export default {
     <Banner
       v-else-if="namespace && !error"
       color="info"
-      :label="`Creates the namespace ${ namespace }, running ${ selected.image }.`"
+      :label="`Creates the namespace ${ namespace } on ${ cluster }, running ${ selected.image }.`"
     />
 
-    <p
-      v-if="selected"
-      class="dev-create__description"
-    >
-      {{ selected.description }}
-    </p>
 
     <div class="dev-create__actions">
       <RcButton
@@ -168,7 +205,12 @@ export default {
 
 <style lang="scss" scoped>
   .dev-create {
-    max-width: 720px;
+    // The product's pages have no padding of their own: the shell's blank template hands the
+    // router-view the whole pane so that a terminal and a browser frame can fill it. A form is
+    // not one of those, so it puts its own back, the same 20px the other pages use.
+    overflow-y: auto;
+    padding:    20px;
+    max-width:  760px;
 
     header {
       display:       block;
@@ -184,9 +226,11 @@ export default {
       }
     }
 
+    // Three across on a wide window and one on a narrow one, rather than a fixed pair: the
+    // cluster's label carries two numbers and does not fit in half of what the name gets.
     &__form {
       display:               grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap:                   20px;
       margin-bottom:         20px;
     }

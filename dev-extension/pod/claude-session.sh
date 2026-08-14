@@ -10,7 +10,9 @@
 #
 # bash rather than sh: `read` with no variable name is a bashism, and this is
 # the pane's interactive shell anyway.
-export HOME=/app/.home
+# The pane's own home, set by shell.sh in the tmux environment. The default is
+# only for a pane started some other way.
+export HOME=${HOME:-/app/.home}
 
 # Ctrl-C at the prompt below leaves you in a shell rather than closing the pane.
 # While claude is running it is claude that gets the signal, not this script, so
@@ -21,6 +23,24 @@ if ! command -v claude >/dev/null 2>&1; then
   echo "[claude is not installed in this pod - see /app/.terminal-tools.log]"
   echo "[dropping to a shell]"
   exec /bin/bash
+fi
+
+# A prompt somebody queued for this conversation, used once and then gone.
+#
+# Read before the loop rather than inside it: it is what this conversation is
+# for, and a restart of claude within the same pane should carry on rather than
+# ask the same thing again. Deleted before claude runs, not after, so a claude
+# that crashes on the prompt does not ask it again on every restart.
+QUEUE=${1:-}
+PROMPT=""
+
+if [ -n "$QUEUE" ] && [ -f "$QUEUE" ]; then
+  PROMPT=$(cat "$QUEUE")
+  rm -f "$QUEUE"
+fi
+
+if [ -n "$PROMPT" ]; then
+  claude --dangerously-skip-permissions "$PROMPT" || true
 fi
 
 while true; do

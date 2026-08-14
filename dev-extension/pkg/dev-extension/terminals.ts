@@ -79,12 +79,17 @@ export function nextTerminalNumber(store: Store): number {
 }
 
 /**
- * What the sidebar's terminal icon does: show a terminal, whatever state the drawer is in.
+ * What the sidebar's terminal icon does: show a terminal, or hide the one that is showing.
  *
- * With nothing open it opens one, so a terminal is one click from anywhere in the product. With
- * something open it brings that one to the front and reopens the drawer if it was closed, which
- * is the obvious thing and not a second identical session. Adding more is the drawer's own job,
- * from the plus in a terminal's controls, the way the harness does it.
+ * A toggle, because the icon is the only thing in the product that opens the drawer and a
+ * control that can only ever open something is one you have to close another way. With nothing
+ * open it opens one, so a terminal is one click from anywhere; with one already in front of you
+ * it puts the drawer away.
+ *
+ * Hiding is `setOpen`, not `close`. Closing a tab would end the session and throw away what is
+ * on screen; this collapses the panel and leaves every tab where it was, so reopening shows the
+ * same session with its scrollback, still attached to the same tmux in the pod. The window
+ * manager keeps the components alive across it, which is what makes that true of the socket too.
  */
 export function showTerminal(store: Store): number {
   const open = openTerminals(store);
@@ -97,8 +102,16 @@ export function showTerminal(store: Store): number {
   // person was in.
   const active = store.state.wm?.active?.bottom;
   const activeNumber = typeof active === 'string' && active.startsWith(TAB_PREFIX) ? Number(active.slice(TAB_PREFIX.length)) : NaN;
+  const showing = open.includes(activeNumber);
 
-  return openTerminal(store, open.includes(activeNumber) ? activeNumber : open[0]);
+  // Showing one of ours already: the icon is asking for it to go away.
+  if (showing && store.state.wm?.open?.bottom) {
+    store.commit('wm/setOpen', { position: 'bottom', open: false }, { root: true });
+
+    return activeNumber;
+  }
+
+  return openTerminal(store, showing ? activeNumber : open[0]);
 }
 
 /**

@@ -22,7 +22,6 @@
 // The hash keeps the property the layout actually needs, which is that a tab is addressable and
 // therefore shareable, and it is what Rancher's own detail pages use.
 import Loading from '@shell/components/Loading';
-import AsyncButton from '@shell/components/AsyncButton';
 import Tabbed from '@shell/components/Tabbed';
 import Tab from '@shell/components/Tabbed/Tab';
 import { Banner } from '@components/Banner';
@@ -32,10 +31,11 @@ import WorkspaceBrowser from '../components/WorkspaceBrowser.vue';
 import WorkspacePorts from '../components/WorkspacePorts.vue';
 import WorkspaceSidecars from '../components/WorkspaceSidecars.vue';
 import {
-  getWorkspace, listWorkspaces, setWorkspaceRunning, workspacePod, workspaceService,
-  workspaceLogTail
+  getWorkspace, listAllWorkspaces, setWorkspaceRunning, workspacePod, workspaceLogTail,
+  sidecarReady, workspaceServing, setCluster
 } from '../api';
-import { templateById } from '../templates';
+import { templateById, templateBrowser } from '../templates';
+import { rememberWorkspace, rememberTab, lastTab } from '../recent';
 import {
   DEV_PRODUCT, BLANK_CLUSTER, WORKSPACES_ROUTE, WORKSPACE_TABS, DEFAULT_WORKSPACE_TAB
 } from '../config/constants';
@@ -46,7 +46,7 @@ export default {
   name: 'DevWorkspaceDetail',
 
   components: {
-    Loading, AsyncButton, Tabbed, Tab, Banner, RcButton,
+    Loading, Tabbed, Tab, Banner, RcButton,
     WorkspaceConversations, WorkspaceBrowser, WorkspacePorts, WorkspaceSidecars
   },
 
@@ -58,7 +58,6 @@ export default {
     return {
       workspace:    null,
       pod:          '',
-      service:      null,
       // The last line the container printed, while it is still starting. See refresh.
       logTail:      '',
       error:        '',
@@ -69,6 +68,9 @@ export default {
       // so a terminal survives a trip to another tab, but a tab nobody opened should not have
       // opened a shell in the pod or framed the workspace's server to begin with.
       seen:         {},
+      // Whether there is anything to frame, which is whether the Browser tab exists at all. See
+      // refresh: it is a question about the browser sidecar, not about the workspace.
+      framable:     false,
       /** The tab Tabbed is actually showing, which is what an unusable hash is corrected to. */
       active:       DEFAULT_WORKSPACE_TAB,
       listTo:       { name: WORKSPACES_ROUTE, params: { product: DEV_PRODUCT, cluster: BLANK_CLUSTER } },
@@ -81,6 +83,15 @@ export default {
     },
 
     /**
+     * The tabs this workspace actually has, which is not always all of them: Browser is there
+     * only while there is something in it. Everything that reads a tab name out of the address
+     * validates against this rather than the full list.
+     */
+    tabs() {
+      return WORKSPACE_TABS.filter((name) => name !== 'browser' || this.framable);
+    },
+
+    /**
      * The tab the address names, or the default when it names none or names one that is not
      * there. Read here as well as by Tabbed, because it decides which tab's content is mounted
      * on the way up, before Tabbed has said anything.
@@ -88,17 +99,16 @@ export default {
     tab() {
       const tab = this.$route.hash.replace('#', '');
 
-      return WORKSPACE_TABS.includes(tab) ? tab : DEFAULT_WORKSPACE_TAB;
-    },
+      if (this.tabs.includes(tab)) {
+        return tab;
+      }
 
-    /**
-     * What the Conversations tab actually is, from the template.
-     *
-     * The harness's Conversations tab is claude. Here it is whatever the template's image can
-     * host, and the tab says which rather than letting someone find out.
-     */
-    conversations() {
-      return templateById(this.workspace?.template)?.conversations || 'shell';
+      // No tab in the address, or one this workspace does not have: the one you were last on,
+      // which is what makes switching between two workspaces keep the same view of both. See
+      // recent.ts. The default is only reached on a browser that remembers nothing.
+      const remembered = lastTab();
+
+      return this.tabs.includes(remembered) ? remembered : DEFAULT_WORKSPACE_TAB;
     },
 
     /** True while there is no pod to frame or talk to, which is what the tabs have to say. */
@@ -110,16 +120,6 @@ export default {
       return this.workspace?.state === 'stopped';
     },
 
-    /**
-     * Tabs that cannot do anything yet, dimmed rather than hidden.
-     *
-     * A tab that disappears while a workspace boots is a layout that moves under the pointer;
-     * a tab that is there and quiet says the same thing without it. Conversations is never in
-     * here, because it is the tab that explains what the workspace is doing instead.
-     */
-    unavailable() {
-      return (this.starting || this.stopped) ? ['browser', 'ports'] : [];
-    },
   },
 
   watch: {
@@ -135,13 +135,14 @@ export default {
     '$route.hash'(hash) {
       const wanted = hash.replace('#', '');
 
-      if (wanted && !WORKSPACE_TABS.includes(wanted)) {
+      if (wanted && !this.tabs.includes(wanted)) {
         this.$router.replace({ ...this.$route, hash: `#${ this.active }` });
       }
     },
   },
 
   mounted() {
+    rememberWorkspace(this.name);
     this.seen[this.tab] = true;
     this.refreshTimer = setInterval(() => this.refresh(), REFRESH_MS);
   },
@@ -151,14 +152,25 @@ export default {
   },
 
   methods: {
-    /** A tab became the active one. Recorded so its content is mounted from here on. */
+    /**
+     * A tab became the active one. Recorded so its content is mounted from here on, and
+     * remembered so the next workspace opens on it.
+     */
     onTabChanged({ tab }) {
       this.seen[tab.name] = true;
       this.active = tab.name;
+      rememberTab(tab.name);
     },
 
     async refresh() {
       this.workspace = await getWorkspace(this.name);
+
+      // Point everything that follows at the cluster this workspace is actually on. It is set
+      // here rather than by the router because a page is about one workspace and every request
+      // it makes is about that workspace's cluster: see setCluster.
+      if (this.workspace?.cluster) {
+        setCluster(this.workspace.cluster);
+      }
 
       if (!this.workspace) {
         // Nothing left to poll for. The page is now a banner saying the workspace is gone, and
@@ -170,16 +182,40 @@ export default {
 
       // The sidebar is the workspace list, and this page is where someone watching one would
       // notice a change, so its poll keeps that list fresh too.
-      listWorkspaces().catch(() => {});
+      listAllWorkspaces().catch(() => {});
 
       // Only ask for the pod when there could be one: a stopped workspace has none.
       this.pod = this.workspace.replicas > 0 ? await workspacePod(this.name) || '' : '';
-      this.service = await workspaceService(this.name);
-
       // The log's last line, only while the workspace is still coming up. It is the difference
       // between "Starting up" and knowing it is four minutes into an install, and once the
       // workspace is running it is the terminal's job rather than this page's.
       this.logTail = this.starting && this.pod ? await workspaceLogTail(this.name, this.pod) : '';
+
+      this.framable = await this.canFrame();
+    },
+
+    /**
+     * Whether the Browser tab has anything in it, which is what decides the tab is there.
+     *
+     * Two different questions, because the two kinds of template frame two different things. A
+     * template with a browser sidecar is asking about the sidecar and not about the workspace:
+     * the browser is worth looking at whatever the workspace is doing, since a workspace that is
+     * still compiling is a page in it that says so.
+     */
+    async canFrame() {
+      const template = templateById(this.workspace?.template);
+
+      if (!template || this.stopped) {
+        return false;
+      }
+
+      const browser = templateBrowser(template);
+
+      if (browser) {
+        return sidecarReady(this.name, browser).catch(() => false);
+      }
+
+      return workspaceServing(this.name, template.port, template.scheme).catch(() => false);
     },
 
     async run(action, done) {
@@ -198,15 +234,15 @@ export default {
       }
     },
 
-    start(done) {
-      return this.run(() => setWorkspaceRunning(this.name, true), done);
-    },
-
-    stop(done) {
-      return this.run(() => setWorkspaceRunning(this.name, false), done);
-    },
-
-    /** From the Conversations tab, which offers to start a workspace that is stopped. */
+    /**
+     * From the Conversations tab, which offers to start a workspace that is stopped.
+     *
+     * The only way in from this page. Start and Stop used to sit on the tab strip as well, on
+     * the argument that they were reachable from every tab and cost no height; what they
+     * actually did was put a button beside four tab labels that is not a tab. The list is where
+     * a workspace is started and stopped, and the tab that has something to say about a stopped
+     * workspace offers it there.
+     */
     startFromTab() {
       return this.run(() => setWorkspaceRunning(this.name, true), () => {});
     },
@@ -234,7 +270,6 @@ export default {
   <div
     v-else
     class="dev-workspace"
-    :class="unavailable.map((tab) => `dev-workspace--no-${ tab }`)"
   >
     <Banner
       v-if="error"
@@ -247,33 +282,6 @@ export default {
       :default-tab="tab"
       @changed="onTabChanged"
     >
-      <!--
-        The only chrome the page has left. Start and Stop are on the tab strip's own row, so
-        they are reachable from every tab and cost no height.
-      -->
-      <template #tab-row-extras>
-        <div class="dev-workspace__actions">
-          <AsyncButton
-            v-if="stopped"
-            mode="apply"
-            action-label="Start"
-            waiting-label="Starting"
-            success-label="Started"
-            :disabled="busy"
-            @click="start"
-          />
-          <AsyncButton
-            v-else
-            mode="apply"
-            action-label="Stop"
-            waiting-label="Stopping"
-            success-label="Stopped"
-            :disabled="busy || workspace.state === 'removing'"
-            @click="stop"
-          />
-        </div>
-      </template>
-
       <Tab
         name="conversations"
         label="Conversations"
@@ -282,7 +290,6 @@ export default {
         <WorkspaceConversations
           v-if="seen.conversations"
           :workspace="workspace"
-          :kind="conversations"
           :log-tail="logTail"
           :busy="busy"
           @start="startFromTab"
@@ -290,20 +297,19 @@ export default {
       </Tab>
 
       <!--
-        The external-link mark, the way the harness marks the tabs that open elsewhere. What
-        Browser frames is served on Rancher's origin rather than by this dashboard, and the
-        tab's own Open takes you out to it.
+        Only while there is a browser to frame. Absent rather than dim, because a Browser tab
+        with nothing in it could only explain itself by talking about a sidecar that is started
+        on the Sidecars tab, and a tab whose content is a pointer to another tab is not content.
       -->
       <Tab
+        v-if="framable"
         name="browser"
         label="Browser"
-        label-icon="icon-external-link"
         :weight="2"
       >
         <WorkspaceBrowser
           v-if="seen.browser"
           :workspace="workspace"
-          :service="service"
         />
       </Tab>
 
@@ -345,15 +351,6 @@ export default {
       padding: 20px;
     }
 
-    &__actions {
-      display:     flex;
-      align-items: center;
-      gap:         10px;
-      // Tabbed lays its strip out as a row, so this sits at the far end of it.
-      margin-left: auto;
-      padding:     0 10px;
-    }
-
     &__tabs {
       display:        flex;
       flex-direction: column;
@@ -362,6 +359,10 @@ export default {
       // Tabbed's own class sets `min-width: fit-content`, so without the max the strip grows to
       // whatever the widest pane wants and takes the page with it.
       max-width:      100%;
+      // And the flex minimum, which max-width alone does not beat: a flex child's minimum is its
+      // content, so the strip stayed wider than the page and put a horizontal scrollbar under
+      // every tab. Both are needed, which is why the max on its own looked like it worked.
+      min-width:      0;
 
       // The tab strip is the top edge of the page, so it keeps the shell's border between it
       // and the content but not the outer frame it would have inside a card.
@@ -386,19 +387,14 @@ export default {
           flex-direction: column;
           flex:           1 1 auto;
           min-height:     0;
+          // And min-width, for the same reason and the one that is easier to forget: a flex
+          // child's minimum is its content by default, so a pane refuses to be narrower than
+          // what is in it and the page grows a horizontal scrollbar instead of the pane
+          // wrapping. It is what put one under the Sidecars tab.
+          min-width:      0;
         }
       }
     }
 
-    // A tab that cannot do anything yet: quiet, still there, still clickable, because what it
-    // shows when you click it is the explanation of why it is quiet.
-    //
-    // The id is where Tabbed puts the tab's name: the `li` carries `:id="tab.name"` and it is
-    // the `a` inside it that carries `aria-controls`, so a selector written against the li's
-    // aria-controls matches nothing and dims nothing.
-    &--no-browser :deep(li.tab#browser),
-    &--no-ports :deep(li.tab#ports) {
-      opacity: 0.45;
-    }
   }
 </style>

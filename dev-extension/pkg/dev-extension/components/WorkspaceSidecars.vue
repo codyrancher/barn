@@ -17,19 +17,31 @@ import { RcButton } from '@components/RcButton';
 import AsyncButton from '@shell/components/AsyncButton';
 import { colorForState, stateDisplay } from '@shell/plugins/dashboard-store/resource-class';
 import LabeledSelect from '@shell/components/form/LabeledSelect';
+import { Checkbox } from '@components/Form/Checkbox';
+import { LabeledInput } from '@components/Form/LabeledInput';
 import {
   listSidecars, startSidecar, stopSidecar, restartSidecar, sidecarProxyUrl, sidecarServiceUrl,
-  templateSecretKey, workspaceAuth, setWorkspaceAuth, sidecarNodePort
+  templateSecretKey, workspaceAuth, setWorkspaceAuth, sidecarNodePort, nodeAddress,
+  sidecarParams, setSidecarParams, sidecarLog
 } from '../api';
 import { templateById } from '../templates';
 
 const REFRESH_MS = 5000;
 
+/**
+ * How often an open log window asks again.
+ *
+ * Faster than the card poll, because a log is what someone opens when they are watching
+ * something happen, and slower than a stream, because this is a fetch of the last five hundred
+ * lines rather than a follow.
+ */
+const LOG_REFRESH_MS = 3000;
+
 export default {
   name: 'WorkspaceSidecars',
 
   components: {
-    Card, Banner, BadgeState, RcButton, AsyncButton, LabeledSelect
+    Card, Banner, BadgeState, RcButton, AsyncButton, LabeledSelect, Checkbox, LabeledInput
   },
 
   props: {
@@ -55,7 +67,22 @@ export default {
       chosen:       {},
       // The node port the cluster assigned a sidecar that asked for one, by id.
       nodePorts:    {},
+      // The node's own address, which is where those ports answer. One fetch, on refresh.
+      node:         '',
       error:        '',
+      // The sidecar whose Configure dialog is open, and the values being edited in it. The
+      // values are a copy: closing without saving has to leave the saved ones alone.
+      configuring:  null,
+      values:       {},
+      saved:        {},
+      // The auth provider the open dialog is offering, which is Rancher's card's and no other's.
+      provider:     '',
+      // The sidecar whose log is open, and what it said when it was asked.
+      logging:      null,
+      // The log as rows rather than as text: each line carries the time the container wrote it.
+      logLines:     [],
+      logNote:      '',
+      logTimer:     null,
       copied:       '',
       copyTimer:    null,
       refreshTimer: null,
@@ -82,8 +109,18 @@ export default {
       return [...groups.entries()].map(([name, items]) => ({ name, items }));
     },
 
-    running() {
-      return Object.values(this.states).filter((state) => state.state === 'running').length;
+    /**
+     * Every provider any of this workspace's sidecars can back, and no provider at all.
+     *
+     * Gathered from the declarations rather than listed, which is what makes a new auth sidecar a
+     * data change. It is offered on the Rancher card because Rancher is what the choice is about:
+     * the closet's dashboard puts the same list in the same place, for the same reason.
+     */
+    authModes() {
+      return [
+        { value: '', label: 'Local users only' },
+        ...this.sidecars.flatMap((sidecar) => sidecar.auth || []),
+      ];
     },
 
     /** The sidecar that owns this workspace's Rancher, which is the one that applies an auth choice. */
@@ -98,6 +135,7 @@ export default {
 
   beforeUnmount() {
     clearInterval(this.refreshTimer);
+    clearInterval(this.logTimer);
     clearTimeout(this.copyTimer);
   },
 
@@ -111,6 +149,7 @@ export default {
 
         this.states = states;
         this.auth = auth;
+        this.node = await nodeAddress();
 
         // Only for the sidecars that asked for one, and only while they are running: an assigned
         // node port is the cluster's answer rather than anything declared here.
@@ -205,16 +244,24 @@ export default {
         .filter((key) => (this.template?.secrets || []).find((secret) => secret.key === key)?.required !== false);
     },
 
+    /**
+     * Why this sidecar cannot start, or '' when it can.
+     *
+     * Only the keys it cannot work without. An optional key that is unset used to be reported
+     * here too, on the argument that a person should know a value is not in use; what that
+     * actually produced was three lines of warning on the Rancher card about cloud credentials
+     * nobody had asked it to use. A sidecar works without an optional key by definition, and
+     * Settings is where which keys are set is a question worth answering.
+     */
     missingLabel(sidecar) {
-      const keys = this.missing(sidecar)
-        .map((key) => templateSecretKey(this.workspace.template, key))
-        .join(', ');
+      const keys = this.missingRequired(sidecar)
+        .map((key) => templateSecretKey(this.workspace.template, key));
 
-      if (this.missingRequired(sidecar).length) {
-        return `Cannot start: ${ keys } is not set. Set it in Settings, then start this.`;
+      if (!keys.length) {
+        return '';
       }
 
-      return `Not in use: ${ keys } is not set. Set it in Settings and start this again.`;
+      return `Cannot start: ${ keys.join(', ') } ${ keys.length > 1 ? 'are' : 'is' } not set. Set ${ keys.length > 1 ? 'them' : 'it' } in Settings, then start this.`;
     },
 
     /** What the cluster says about a sidecar that is not running, when it says anything. */
@@ -237,9 +284,9 @@ export default {
      *
      * A node port when the declaration asks for one, and that is not a preference: Keycloak
      * rewrites itself out of a path prefix, so the service proxy can only ever serve it a 404,
-     * which is why it has a node port in the first place. The hostname is this page's rather than
-     * the node's InternalIP, for the reason workspaceOriginUrl gives: the browser reached Rancher
-     * at it, so it can reach the node port at it.
+     * which is why it has a node port in the first place. The host is the node's own, for the
+     * reason nodeAddress gives: a published port is one that has to work from off the cluster,
+     * and this page's own hostname is a name that resolves on Rancher's network and nowhere else.
      */
     url(sidecar) {
       if (!sidecar.port) {
@@ -248,8 +295,8 @@ export default {
 
       const published = this.nodePorts[sidecar.id];
 
-      if (published) {
-        return `${ sidecar.scheme || 'http' }://${ window.location.hostname }:${ published }/`;
+      if (published && this.node) {
+        return `${ sidecar.scheme || 'http' }://${ this.node }:${ published }/`;
       }
 
       return sidecarProxyUrl(this.workspace.name, sidecar);
@@ -262,6 +309,123 @@ export default {
       }
 
       return `claude mcp add --transport http ${ sidecar.id } ${ this.address(sidecar) }:${ sidecar.port }${ sidecar.mcpPath }`;
+    },
+
+    /**
+     * Whether this card has a gear at all.
+     *
+     * Params, or an auth provider it can back. The closet's own card asks exactly this question,
+     * and for the same reason: a gear that opens an empty dialog is worse than no gear.
+     */
+    hasConfig(sidecar) {
+      return !!(sidecar.params || []).length || !!sidecar.providesApi;
+    },
+
+    async openConfig(sidecar) {
+      this.error = '';
+
+      try {
+        const values = await sidecarParams(this.workspace.name, sidecar);
+
+        // Two copies: one being edited and one to compare it against, so Save can say whether
+        // there is anything to save rather than restarting a sidecar over an opened dialog.
+        this.values = { ...values };
+        this.saved = { ...values };
+        this.provider = this.auth.wanted || '';
+        this.configuring = sidecar;
+      } catch (e) {
+        this.error = e.message || String(e);
+      }
+    },
+
+    closeConfig() {
+      this.configuring = null;
+    },
+
+    /**
+     * Save, and apply.
+     *
+     * Applying is a restart, because a container reads its environment once. A sidecar that is
+     * not running is started instead, which is the same write and the same result: what it comes
+     * up with is what was just saved.
+     */
+    async saveConfig(done) {
+      this.error = '';
+
+      const sidecar = this.configuring;
+
+      try {
+        await setSidecarParams(this.workspace.name, sidecar, this.values);
+
+        // The auth choice is Rancher's card, so it is only ever saved from that dialog, and only
+        // when it actually changed: setWorkspaceAuth writes a request the manager then acts on,
+        // and rewriting the same request would have it applied again for nothing.
+        if (sidecar.providesApi && this.provider !== this.auth.wanted) {
+          await setWorkspaceAuth(this.workspace.name, this.provider);
+        }
+
+        if (this.stateOf(sidecar) === 'stopped') {
+          await startSidecar(this.workspace.name, sidecar, this.template);
+        } else {
+          await restartSidecar(this.workspace.name, sidecar, this.template);
+        }
+
+        this.configuring = null;
+        await this.refresh();
+        done(true);
+      } catch (e) {
+        this.error = e.message || String(e);
+        done(false);
+      }
+    },
+
+    /**
+     * Open the log, and keep it open on the current one.
+     *
+     * There is no Refresh button on either the log or the list, deliberately: both are already
+     * polling, and a button beside something that updates itself is a button that only ever
+     * confirms what is already on screen. The log's poll stops when the window closes, so a
+     * dialog nobody has open costs nothing.
+     */
+    openLog(sidecar) {
+      this.logging = sidecar;
+      this.logLines = [];
+      this.logNote = '';
+      clearInterval(this.logTimer);
+      this.logTimer = setInterval(() => this.readLog(sidecar), LOG_REFRESH_MS);
+
+      return this.readLog(sidecar);
+    },
+
+    async readLog(sidecar) {
+      try {
+        const log = await sidecarLog(this.workspace.name, sidecar);
+
+        this.logNote = log ? '' : 'This sidecar has no pod yet, so it has not said anything.';
+
+        // Newest first. A container's log is written oldest-first and read the other way round:
+        // what someone opens this for is the last thing it said, and scrolling to the bottom of
+        // five hundred lines to find it is the whole of the friction this removes.
+        this.logLines = (log ? log.replace(/\n$/, '').split('\n') : [])
+          .reverse()
+          .map((line, index) => {
+            // The apiserver writes `2026-08-14T19:48:15.123456789Z the line`. The date is the
+            // same for everything on screen, so only the time is kept; a line with no timestamp
+            // in front of it is passed through as it is rather than being carved up.
+            const match = /^(\d{4}-\d\d-\d\dT)(\d\d:\d\d:\d\d)\.\d+Z (.*)$/.exec(line);
+
+            return { key: index, at: match ? match[2] : '', text: match ? match[3] : line };
+          });
+      } catch (e) {
+        this.logLines = [];
+        this.logNote = e.message || String(e);
+      }
+    },
+
+    closeLog() {
+      clearInterval(this.logTimer);
+      this.logTimer = null;
+      this.logging = null;
     },
 
     async start(sidecar, done) {
@@ -322,18 +486,11 @@ export default {
 
 <template>
   <div class="workspace-sidecars">
-    <header>
-      <h3>Sidecars</h3>
-      <span class="workspace-sidecars__count">{{ running }} of {{ sidecars.length }} running</span>
-      <RcButton
-        variant="tertiary"
-        size="small"
-        left-icon="refresh"
-        @click="refresh"
-      >
-        Refresh
-      </RcButton>
-    </header>
+    <!--
+      No heading and no count. The tab strip already says Sidecars, and every card already carries
+      its own state badge, so a line saying how many of them are running was arithmetic over what
+      is on screen underneath it.
+    -->
 
     <Banner
       v-if="error"
@@ -368,6 +525,31 @@ export default {
                 :color="badgeColor(sidecar)"
                 :label="badgeLabel(sidecar)"
               />
+              <!--
+                The two icons the closet's card has, in the same corner: what it is doing, and
+                what it is set to. Both are quiet, because a card is mostly read rather than
+                operated, and both are only there when they have something behind them.
+              -->
+              <button
+                v-if="stateOf(sidecar) !== 'stopped'"
+                v-clean-tooltip="'Logs'"
+                type="button"
+                class="workspace-sidecars__icon"
+                :aria-label="`Logs for ${ sidecar.label }`"
+                @click="openLog(sidecar)"
+              >
+                <i class="icon icon-file" />
+              </button>
+              <button
+                v-if="hasConfig(sidecar)"
+                v-clean-tooltip="'Configure'"
+                type="button"
+                class="workspace-sidecars__icon"
+                :aria-label="`Configure ${ sidecar.label }`"
+                @click="openConfig(sidecar)"
+              >
+                <i class="icon icon-gear" />
+              </button>
             </div>
           </template>
 
@@ -377,7 +559,7 @@ export default {
               {{ sidecar.image }}
             </p>
             <p
-              v-if="missing(sidecar).length"
+              v-if="missingLabel(sidecar)"
               class="workspace-sidecars__missing"
             >
               {{ missingLabel(sidecar) }}
@@ -431,69 +613,18 @@ export default {
             </p>
 
             <!--
-              The auth row, which is the closet's: one provider at a time, so applying this one is
-              also turning the other off. The manager is what carries it out, so this writes the
-              request and reads back what the manager said about it.
+              What Rancher is using now, when this card is what it is using. The choosing has
+              moved behind the gear, where the rest of a sidecar's configuration is; this is the
+              one line about it that is worth having on the card itself.
             -->
-            <div
+            <p
               v-if="sidecar.auth"
-              class="workspace-sidecars__auth"
+              class="workspace-sidecars__detail"
             >
-              <div class="workspace-sidecars__auth-row">
-                <span class="workspace-sidecars__auth-label">Rancher auth</span>
-                <LabeledSelect
-                  v-if="sidecar.auth.length > 1"
-                  :value="chosen[sidecar.id]"
-                  :options="sidecar.auth"
-                  option-label="label"
-                  option-key="value"
-                  :reduce="(mode) => mode.value"
-                  :clearable="false"
-                  class="workspace-sidecars__auth-select"
-                  @update:value="(value) => chosen = { ...chosen, [sidecar.id]: value }"
-                />
-                <span v-else>{{ sidecar.auth[0].label }}</span>
-                <AsyncButton
-                  mode="apply"
-                  :action-label="appliedMode(sidecar) ? 'Re-apply' : 'Apply'"
-                  waiting-label="Applying"
-                  success-label="Asked"
-                  :disabled="!canApplyAuth(sidecar)"
-                  @click="(done) => applyAuth(sidecar, done)"
-                />
-                <AsyncButton
-                  v-if="appliedMode(sidecar)"
-                  mode="apply"
-                  action-label="Disable"
-                  waiting-label="Disabling"
-                  success-label="Asked"
-                  @click="(done) => clearAuth(done)"
-                />
-              </div>
-              <!--
-                Three different things, and saying which is which is the point of the row: what
-                Rancher is using now, a request the manager has not got to yet, and why it cannot
-                be asked at all.
-              -->
-              <p
-                v-if="appliedMode(sidecar)"
-                class="workspace-sidecars__auth-state"
-              >
-                Applied: {{ appliedMode(sidecar).label }}. {{ auth.message }}
-              </p>
-              <p
-                v-else-if="pendingAuth(sidecar)"
-                class="workspace-sidecars__auth-state"
-              >
-                Asked for, waiting for the Rancher sidecar to apply it. {{ auth.message }}
-              </p>
-              <p
-                v-else-if="!canApplyAuth(sidecar)"
-                class="workspace-sidecars__auth-state"
-              >
-                Start this and the Rancher sidecar, then Apply.
-              </p>
-            </div>
+              <template v-if="appliedMode(sidecar)">Rancher auth: {{ appliedMode(sidecar).label }}. {{ auth.message }}</template>
+              <template v-else-if="pendingAuth(sidecar)">Rancher auth: asked for, waiting for the Rancher sidecar to apply it.</template>
+              <template v-else>Not in use - turn it on with the auth provider setting on the Rancher card.</template>
+            </p>
 
             <div class="workspace-sidecars__links">
               <!--
@@ -559,6 +690,131 @@ export default {
         </Card>
       </div>
     </section>
+
+    <!--
+      Configure: the sidecar's own settings, and for the one that backs an auth provider, which
+      provider Rancher should use. One dialog and one button, as the closet has it, because the
+      two are applied by the same restart and asking twice would be asking about the same pod.
+    -->
+    <div
+      v-if="configuring"
+      class="workspace-sidecars__modal"
+      @click.self="closeConfig"
+    >
+      <div class="workspace-sidecars__dialog">
+        <header>
+          <h3>Configure {{ configuring.label }}</h3>
+          <RcButton
+            variant="tertiary"
+            size="small"
+            left-icon="close"
+            aria-label="Close"
+            @click="closeConfig"
+          />
+        </header>
+
+        <div class="workspace-sidecars__fields">
+          <div
+            v-for="param in (configuring.params || [])"
+            :key="param.id"
+            class="workspace-sidecars__field"
+          >
+            <Checkbox
+              v-if="param.type === 'boolean'"
+              :value="values[param.id] === 'true'"
+              :label="param.label"
+              @update:value="(on) => values = { ...values, [param.id]: on ? 'true' : '' }"
+            />
+            <LabeledInput
+              v-else
+              :value="values[param.id]"
+              :label="param.label"
+              @update:value="(value) => values = { ...values, [param.id]: value }"
+            />
+            <p class="workspace-sidecars__help">
+              {{ param.description }}
+            </p>
+          </div>
+
+          <!--
+            The auth provider, for the card that can back one. It is stored rather than performed:
+            what carries it out is the manager inside the workspace's Rancher. See setWorkspaceAuth.
+          -->
+          <div
+            v-if="configuring.providesApi"
+            class="workspace-sidecars__field"
+          >
+            <LabeledSelect
+              :value="provider"
+              :options="authModes"
+              label="Auth provider"
+              option-label="label"
+              option-key="value"
+              :reduce="(mode) => mode.value"
+              :clearable="false"
+              @update:value="(value) => provider = value"
+            />
+            <p class="workspace-sidecars__help">
+              Rancher allows one provider at a time, so choosing one turns the others off. The
+              sidecar behind the choice is started with it, and this Rancher restarts to pick it up.
+            </p>
+          </div>
+        </div>
+
+        <footer>
+          <RcButton
+            variant="secondary"
+            @click="closeConfig"
+          >
+            Cancel
+          </RcButton>
+          <AsyncButton
+            mode="apply"
+            :action-label="stateOf(configuring) === 'stopped' ? 'Save and start' : 'Save and restart'"
+            waiting-label="Applying"
+            success-label="Applied"
+            @click="saveConfig"
+          />
+        </footer>
+      </div>
+    </div>
+
+    <!-- The container's own log, which is the answer to most of what a card cannot say. -->
+    <div
+      v-if="logging"
+      class="workspace-sidecars__modal"
+      @click.self="closeLog"
+    >
+      <div class="workspace-sidecars__dialog workspace-sidecars__dialog--wide">
+        <header>
+          <h3>{{ logging.label }} log</h3>
+          <RcButton
+            variant="tertiary"
+            size="small"
+            left-icon="close"
+            aria-label="Close"
+            @click="closeLog"
+          />
+        </header>
+        <!-- Newest first, each line with the time the container wrote it. See readLog. -->
+        <div class="workspace-sidecars__log-body">
+          <p
+            v-if="logNote"
+            class="workspace-sidecars__log-note"
+          >
+            {{ logNote }}
+          </p>
+          <div
+            v-for="line in logLines"
+            :key="line.key"
+            class="workspace-sidecars__log-line"
+          >
+            <span class="workspace-sidecars__log-at">{{ line.at }}</span>
+            <span class="workspace-sidecars__log-text">{{ line.text }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -566,25 +822,16 @@ export default {
   .workspace-sidecars {
     overflow-y: auto;
     padding:    20px;
-
-    header {
-      display:       flex;
-      align-items:   center;
-      gap:           10px;
-      margin-bottom: 10px;
-
-      h3 {
-        margin: 0;
-      }
-    }
-
-    &__count {
-      color:     var(--muted);
-      font-size: 12px;
-    }
+    // Nothing here is meant to be scrolled sideways: the cards wrap, and the one thing wider
+    // than the pane is a dialog that covers it anyway.
+    overflow-x: hidden;
 
     &__group {
       margin-top: 20px;
+
+      &:first-of-type {
+        margin-top: 0;
+      }
 
       h4 {
         margin:         0 0 8px 0;
@@ -596,9 +843,14 @@ export default {
     }
 
     // Two to a row, as the harness has them, and one on a narrow window.
+    //
+    // auto-fill rather than auto-fit, which is the difference between a group of one and a group
+    // of two having cards of the same width: auto-fit collapses the tracks nothing is in, so a
+    // group with a single card stretched it across the whole row while its neighbours were half
+    // that. auto-fill keeps the empty track, so every card in every group is one column wide.
     &__cards {
       display:               grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
       gap:                   10px;
       max-width:             1000px;
     }
@@ -676,6 +928,142 @@ export default {
       display:   flex;
       gap:       10px;
       margin-top: 10px;
+    }
+
+    // The card's own corner controls: quiet, and the same box as each other.
+    &__icon {
+      display:         flex;
+      align-items:     center;
+      justify-content: center;
+      width:           22px;
+      height:          22px;
+      min-height:      22px;
+      padding:         0;
+      border:          none;
+      border-radius:   var(--border-radius);
+      background:      transparent;
+      color:           var(--muted);
+      cursor:          pointer;
+
+      &:hover {
+        background: var(--nav-hover, var(--accent-btn));
+        color:      var(--body-text);
+      }
+
+      .icon {
+        font-size: 14px;
+      }
+    }
+
+    // The second icon sits at the card's right edge, and the first beside it, so the two are a
+    // pair in the corner rather than two things after the badge.
+    &__title &__icon:first-of-type {
+      margin-left: auto;
+    }
+
+    // A dialog of this component's own rather than the shell's modal, which is driven through
+    // Vuex and expects a registered component. This is a panel over the tab, and the click on the
+    // backdrop closes it, which is the whole of the behaviour.
+    &__modal {
+      position:        fixed;
+      inset:           0;
+      z-index:         100;
+      display:         flex;
+      align-items:     center;
+      justify-content: center;
+      background:      rgba(0, 0, 0, 0.5);
+    }
+
+    &__dialog {
+      display:        flex;
+      flex-direction: column;
+      width:          560px;
+      max-width:      90vw;
+      max-height:     80vh;
+      border:         1px solid var(--border);
+      border-radius:  var(--border-radius);
+      background:     var(--body-bg);
+
+      &--wide {
+        width: 900px;
+      }
+
+      header {
+        display:       flex;
+        align-items:   center;
+        gap:           10px;
+        padding:       12px 16px;
+        border-bottom: 1px solid var(--border);
+
+        h3 {
+          flex:   1 1 auto;
+          margin: 0;
+        }
+      }
+
+      footer {
+        display:         flex;
+        justify-content: flex-end;
+        gap:             10px;
+        padding:         12px 16px;
+        border-top:      1px solid var(--border);
+      }
+    }
+
+    &__fields {
+      overflow-y: auto;
+      padding:    16px;
+    }
+
+    &__field {
+      margin-bottom: 20px;
+
+      &:last-child {
+        margin-bottom: 0;
+      }
+    }
+
+    // The sentence under a field, which is the declaration's own description.
+    &__help {
+      max-width: 70ch;
+      margin:    6px 0 0 0;
+      color:     var(--muted);
+      font-size: 12px;
+    }
+
+    &__log-body {
+      overflow:    auto;
+      flex:        1 1 auto;
+      margin:      0;
+      padding:     12px 16px;
+      background:  var(--body-bg);
+      color:       var(--body-text);
+      font-family: monospace;
+      font-size:   12px;
+    }
+
+    // Time and text as two columns, so the times line up down the left and a wrapped line stays
+    // under its own text rather than under the clock.
+    &__log-line {
+      display: flex;
+      gap:     10px;
+    }
+
+    &__log-at {
+      flex:  0 0 auto;
+      color: var(--muted);
+    }
+
+    &__log-text {
+      flex:        1 1 auto;
+      min-width:   0;
+      white-space: pre-wrap;
+      word-break:  break-all;
+    }
+
+    &__log-note {
+      margin: 0;
+      color:  var(--muted);
     }
   }
 </style>

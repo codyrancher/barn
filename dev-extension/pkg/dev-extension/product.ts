@@ -1,5 +1,5 @@
 import { IPlugin } from '@shell/core/types';
-import { ensureDevRbac } from './api';
+import { ensureDevRbac, ensureWorkspaceApi } from './api';
 import {
   PRODUCT_NAME, CUSTOM_PAGE_NAME, BLANK_CLUSTER, HOME_ROUTE,
   EXPLORER_PRODUCT, FLOOF_PAGE, FLOOF_ROUTE,
@@ -110,4 +110,9 @@ function devProduct($plugin: IPlugin, store: any) {
   // Create-if-missing, so a cluster that already has them keeps what it has, and quiet, for the
   // same reason the fetch above is: this runs for every user on every load.
   ensureDevRbac().catch(() => {});
+
+  // The workspace API, for everything that is not a person: an action with no browser and no
+  // Rancher session can still ask for a workspace. Same rule as above - create if missing, quiet
+  // if the person looking cannot create any of it. See ensureWorkspaceApi.
+  ensureWorkspaceApi().catch(() => {});
 }

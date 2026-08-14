@@ -161,9 +161,25 @@ printf 'bootstrapPassword: %s\\n' "$CATTLE_BOOTSTRAP_PASSWORD" > /tmp/rancher-va
 chmod 600 /tmp/rancher-values.yaml
 set -x
 
+# The two things the card's gear sets, and the only reason this is built up rather than written
+# out: an empty RANCHER_TAG has to mean "whatever the chart installs" rather than an image tag of
+# the empty string, which is a pod that cannot pull.
+EXTRA=""
+
+if [ -n "$RANCHER_TAG" ]; then
+  EXTRA="$EXTRA --set rancherImageTag=$RANCHER_TAG"
+fi
+
+# Prime is a UI brand, set as an environment variable on the Rancher container. The chart's own
+# way to pass one through is extraEnv, which is a list, so it is indexed.
+if [ -n "$RANCHER_PRIME" ]; then
+  EXTRA="$EXTRA --set extraEnv[0].name=CATTLE_BASE_UI_BRAND --set extraEnv[0].value=suse"
+fi
+
 helm upgrade --install rancher rancher-latest/rancher \\
   -n cattle-system --create-namespace \\
   --set hostname="$RANCHER_HOSTNAME" --set replicas=1 \\
+  $EXTRA \\
   -f /tmp/rancher-values.yaml \\
   --wait --timeout 20m
 
@@ -295,6 +311,37 @@ if [ -n "$TOKEN" ]; then
       -d "{\\"name\\":\\"$name\\",\\"value\\":\\"$value\\"}" \\
       -o /dev/null -w "bootstrap $name %{http_code}\\n"
   done
+  # The cloud credentials this person has set, put into this Rancher so a cluster can be
+  # provisioned without typing them in again. The closet does the same at start, and for the same
+  # reason: they are the workspace's own copy of a credential that already exists, not a new one.
+  #
+  # Only where both halves of a credential are set. A cloud credential with one of its two keys
+  # is one Rancher accepts and every provisioning attempt then fails on, which is worse than not
+  # having it: the failure arrives minutes later and names something else.
+  if [ -n "$AWS_ACCESS_KEY" ] && [ -n "$AWS_SECRET_KEY" ]; then
+    # The name is fixed, so this is the same credential on every restart rather than a new one
+    # each time. Rancher generates the id, so an existing one is found by name and left alone.
+    if curl -sk --max-time 20 -H "Authorization: Bearer $TOKEN" "$RURL/v3/cloudcredentials" \
+      | grep -q '"name":"aws"'; then
+      echo "bootstrap aws credential already there"
+    else
+      set +x
+      cat > /tmp/aws-cred.json <<JSON
+{"type":"provisioning.cattle.io/cloud-credential","name":"aws",
+ "description":"From the workspace's own settings",
+ "amazonec2credentialConfig":{"accessKey":"$AWS_ACCESS_KEY","secretKey":"$AWS_SECRET_KEY","defaultRegion":"\${AWS_DEFAULT_REGION:-us-west-2}"}}
+JSON
+      chmod 600 /tmp/aws-cred.json
+      set -x
+
+      curl -sk --max-time 20 -X POST "$RURL/v3/cloudcredentials" \
+        -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+        -d @/tmp/aws-cred.json -o /dev/null -w "bootstrap aws credential %{http_code}\n"
+
+      rm -f /tmp/aws-cred.json
+    fi
+  fi
+
   echo "bootstrap done"
 else
   echo "bootstrap skipped: could not log in as admin"

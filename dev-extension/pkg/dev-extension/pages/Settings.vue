@@ -27,9 +27,10 @@ import AsyncButton from '@shell/components/AsyncButton';
 import { Banner } from '@components/Banner';
 import { RcButton } from '@components/RcButton';
 import { LabeledInput } from '@components/Form/LabeledInput';
+import BrandImage from '@shell/components/BrandImage';
 import {
-  setSecretKeys, saveSecrets, secretValue, claudeIdentity, migrateGithubToken,
-  templateSecretKey, devPodServiceAccount
+  setSecretKeys, saveSecrets, secretValue, migrateGithubToken, templateSecretKey,
+  listPrompts, savePrompts as writePrompts
 } from '../api';
 import { TEMPLATES, GLOBAL_SECRETS } from '../templates';
 
@@ -37,7 +38,7 @@ export default {
   name: 'DevSettings',
 
   components: {
-    Loading, AsyncButton, Banner, RcButton, LabeledInput
+    Loading, AsyncButton, Banner, RcButton, LabeledInput, BrandImage
   },
 
   async fetch() {
@@ -50,13 +51,19 @@ export default {
   data() {
     return {
       keys:     [],
-      claude:   null,
-      podSa:    null,
+      // The prompts a queued conversation opens on, and the edits made to them. Separate from
+      // the secret edits because these are read back after they are saved, and a secret is not.
+      prompts:      [],
+      promptEdits:  {},
+      // The sections whose fields are showing. A card opens on its summary line, because what a
+      // person comes here to know first is whether a template is configured at all.
+      open:         {},
+      // Written here rather than in the template: a moustache cannot contain the braces it is
+      // made of, and escaping them in the markup is less readable than one string.
+      placeholders: '{{repo}} {{pr}} {{issue}} {{title}} {{url}}',
       // Key to the string typed into its field. A key that is not in here was not touched, and
       // is not written on Save. An empty field is never in here: clearing is what Clear is for.
       edits:    {},
-      // Keys Clear was pressed on, which is the only thing that writes an empty value.
-      cleared:  [],
       // Key to the value of a generated secret, once Show has been pressed for it.
       revealed: {},
       error:    '',
@@ -83,40 +90,69 @@ export default {
         ...TEMPLATES.map((template) => ({
           id:      template.id,
           title:   template.label,
-          help:    `Secrets the ${ template.label } template and its sidecars need. Stored under the ${ template.id }. prefix, so two templates can each have a key of the same name.`,
+          // The card's own identity, so a template reads as the thing it is rather than as a
+          // heading over some fields. The harness's settings card does the same: a mark, a name,
+          // a line about what it is, and the identifier under it.
+          icon:    template.icon,
+          logo:    template.logo,
+          // A short line rather than the description's first sentence, which is a paragraph in
+          // its own right: this is the line under a name on a card, and it has one line of room.
+          subtitle: `${ template.label } dev environment`,
+          meta:    template.id,
+          help:    `Stored under the ${ template.id }. prefix, so two templates can each have a key of the same name.`,
           secrets: (template.secrets || []).map((secret) => this.field(secret, templateSecretKey(template.id, secret.key))),
         })),
       ];
     },
 
-    changed() {
-      return Object.keys(this.edits).length > 0 || this.cleared.length > 0;
-    },
-
     /** What Save will write: the fields that were typed into, and the keys Clear was pressed on. */
     writes() {
-      const out = { ...this.edits };
-
-      for (const key of this.cleared) {
-        out[key] = '';
-      }
-
-      return out;
+      return { ...this.edits };
     },
 
-    claudeState() {
-      if (!this.claude) {
-        return 'No claude login is stored yet. A terminal that logs in pushes its credentials here, and every other terminal pulls them.';
-      }
-
-      const expires = new Date(this.claude.expiresAt);
-      const valid = this.claude.expiresAt > Date.now();
-
-      return `${ this.claude.subscriptionType } login, ${ valid ? 'valid until' : 'expired' } ${ expires.toLocaleString() }.`;
-    },
   },
 
   methods: {
+    /** How many of a section's keys have a value, which is the card's summary line. */
+    configured(section) {
+      return section.secrets.filter((secret) => secret.set).length;
+    },
+
+    toggle(section) {
+      this.open = { ...this.open, [section.id]: !this.open[section.id] };
+    },
+
+    /** What is in a prompt's box: the edit if there is one, and what is stored otherwise. */
+    promptText(prompt) {
+      return this.promptEdits[prompt.id] ?? prompt.text;
+    },
+
+    /** Whether anything has actually been typed, which is what Save is enabled by. */
+    promptsChanged() {
+      return this.prompts.some((prompt) => this.promptText(prompt) !== prompt.text);
+    },
+
+    /**
+     * Save the prompts that changed, and nothing else.
+     *
+     * The same rule the secrets above follow: a field nobody touched is not written, so two
+     * people saving different things do not overwrite each other's untouched ones.
+     */
+    async savePrompts(done) {
+      const changed = Object.fromEntries(this.prompts
+        .filter((prompt) => this.promptText(prompt) !== prompt.text)
+        .map((prompt) => [prompt.id, this.promptText(prompt)]));
+
+      try {
+        await writePrompts(changed);
+        await this.refresh();
+        done(true);
+      } catch (e) {
+        this.error = e.message || String(e);
+        done(false);
+      }
+    },
+
     /** One declaration, joined to whether the cluster has it. */
     field(secret, key) {
       return {
@@ -127,15 +163,15 @@ export default {
     },
 
     async refresh() {
-      const [keys, claude, podSa] = await Promise.all([
+      const [keys, prompts] = await Promise.all([
         setSecretKeys().catch(() => []),
-        claudeIdentity().catch(() => null),
-        devPodServiceAccount().catch(() => null),
+        listPrompts().catch(() => []),
       ]);
 
+      this.prompts = prompts;
+      this.promptEdits = {};
+
       this.keys = keys;
-      this.claude = claude;
-      this.podSa = podSa;
     },
 
     placeholder(secret) {
@@ -146,7 +182,23 @@ export default {
       return secret.generated ? 'Generated when it is first needed' : 'Not set';
     },
 
-    async reveal(secret) {
+    /**
+     * What is in the box: what was typed, or the revealed value, or nothing.
+     *
+     * A secret that has not been revealed shows its placeholder rather than a row of dots for a
+     * value the page does not have. Typing wins over both, because it is what will be saved.
+     */
+    fieldValue(secret) {
+      return this.edits[secret.storeKey] ?? this.revealed[secret.storeKey] ?? '';
+    },
+
+    async toggleReveal(secret) {
+      if (this.revealed[secret.storeKey]) {
+        this.hide(secret);
+
+        return;
+      }
+
       try {
         this.revealed = { ...this.revealed, [secret.storeKey]: await secretValue(secret.storeKey) };
       } catch (e) {
@@ -179,26 +231,35 @@ export default {
       }
 
       this.edits = edits;
-      this.cleared = this.cleared.filter((key) => key !== secret.storeKey);
     },
 
     /** An explicit clear, which is the only thing that writes an empty value. */
-    clear(secret) {
-      if (!this.cleared.includes(secret.storeKey)) {
-        this.cleared = [...this.cleared, secret.storeKey];
-      }
 
-      this.hide(secret);
+    /** Whether anything in one card was typed into, which is what its Save asks. */
+    changedIn(section) {
+      return section.secrets.some((secret) => secret.storeKey in this.edits);
     },
 
-    async save(done) {
+    /**
+     * Save one card's keys, and only that card's.
+     *
+     * Each card has its own button, inside its own accordion, because that is where the fields
+     * are: a single Save at the foot of the page is a button a long way from what it acts on, and
+     * one that quietly writes the other cards' edits too. The store is still one Secret, so this
+     * is a narrower write rather than a different one.
+     */
+    async save(section, done) {
       this.error = '';
       this.saved = false;
 
+      const keys = section.secrets.map((secret) => secret.storeKey);
+      const writes = Object.fromEntries(Object.entries(this.writes).filter(([key]) => keys.includes(key)));
+
       try {
-        await saveSecrets(this.writes);
-        this.edits = {};
-        this.cleared = [];
+        await saveSecrets(writes);
+
+        // Only this card's, so an edit sitting in another card is not lost by saving this one.
+        this.edits = Object.fromEntries(Object.entries(this.edits).filter(([key]) => !keys.includes(key)));
         this.revealed = {};
         await this.refresh();
         this.saved = true;
@@ -238,24 +299,68 @@ export default {
       label="Saved."
     />
 
+    <!--
+      A card per template, the shape the harness's own settings page has: the template's mark and
+      name, one line about what it is, and a summary of how many of its keys are set that opens
+      the fields when you press it. A page of forty fields is one nobody reads; a page of three
+      cards saying "5 keys configured" is one that answers the usual question without being
+      opened at all.
+    -->
     <section
       v-for="section in sections"
       :key="section.id"
-      class="dev-settings__section"
+      class="dev-settings__card"
     >
-      <h3>{{ section.title }}</h3>
-      <p class="subheader">
-        {{ section.help }}
-      </p>
+      <div class="dev-settings__card-head">
+        <BrandImage
+          v-if="section.logo"
+          class="dev-settings__card-icon"
+          :file-name="section.logo"
+        />
+        <i
+          v-else
+          class="dev-settings__card-icon icon"
+          :class="section.icon || 'icon-gear'"
+        />
+        <div class="dev-settings__card-title">
+          <h3>{{ section.title }}</h3>
+          <p v-if="section.subtitle">
+            {{ section.subtitle }}
+          </p>
+          <p
+            v-if="section.meta"
+            class="dev-settings__card-meta"
+          >
+            {{ section.meta }} &middot; {{ section.secrets.length }} keys
+          </p>
+        </div>
+      </div>
 
-      <p
-        v-if="!section.secrets.length"
-        class="dev-settings__none"
+      <button
+        type="button"
+        class="dev-settings__summary"
+        @click="toggle(section)"
       >
-        This template declares no secrets.
-      </p>
+        <i
+          class="icon"
+          :class="open[section.id] ? 'icon-chevron-down' : 'icon-chevron-right'"
+        />
+        {{ configured(section) }} of {{ section.secrets.length }} keys configured
+      </button>
 
-      <div
+      <template v-if="open[section.id]">
+        <p class="subheader">
+          {{ section.help }}
+        </p>
+
+        <p
+          v-if="!section.secrets.length"
+          class="dev-settings__none"
+        >
+          This template declares no secrets.
+        </p>
+
+        <div
         v-for="secret in section.secrets"
         :key="secret.storeKey"
         class="dev-settings__field"
@@ -265,13 +370,32 @@ export default {
           something was typed into it. With v-model an input that emitted once on mount would put
           every key in there as an empty string, and an empty string is a deliberate clear.
         -->
+        <!--
+          The value lives in the box, revealed or not, which is where Rancher puts a password:
+          its own Password component is a LabeledInput whose type flips between password and text
+          from a link in the suffix slot, and this is that arrangement with one difference. The
+          value of a generated secret is not in the page until Show is pressed, because it is
+          fetched then; a typed one is never offered back at all.
+        -->
         <LabeledInput
-          type="password"
-          :value="edits[secret.storeKey] || ''"
+          :type="revealed[secret.storeKey] ? 'text' : 'password'"
+          :value="fieldValue(secret)"
           :label="secret.label"
           :placeholder="placeholder(secret)"
           @update:value="(value) => edit(secret, value)"
-        />
+        >
+          <template
+            v-if="secret.generated && secret.set"
+            #suffix
+          >
+            <div class="addon">
+              <a
+                href="#"
+                @click.prevent.stop="toggleReveal(secret)"
+              >{{ revealed[secret.storeKey] ? 'Hide' : 'Show' }}</a>
+            </div>
+          </template>
+        </LabeledInput>
         <!--
           The help is a paragraph rather than LabeledInput's `sub-label`, because that slot is
           `position: absolute; top: 100%` with pointer events, so it hangs over whatever follows
@@ -295,80 +419,70 @@ export default {
             v-if="secret.generated"
             class="dev-settings__state"
           >Generated</span>
-
-          <!--
-            Only for generated secrets, and only one at a time. A value someone typed is never
-            offered back; a value the product made up has to be readable or the sidecar it belongs
-            to cannot be logged into.
-          -->
-          <RcButton
-            v-if="secret.generated && secret.set && !revealed[secret.storeKey]"
-            variant="link"
-            size="small"
-            @click="reveal(secret)"
-          >
-            Show
-          </RcButton>
-          <template v-else-if="revealed[secret.storeKey]">
-            <code class="dev-settings__revealed">{{ revealed[secret.storeKey] }}</code>
-            <RcButton
-              variant="link"
-              size="small"
-              @click="hide(secret)"
-            >
-              Hide
-            </RcButton>
-          </template>
-
-          <RcButton
-            v-if="secret.set"
-            variant="link"
-            size="small"
-            @click="clear(secret)"
-          >
-            Clear
-          </RcButton>
-          <span
-            v-if="cleared.includes(secret.storeKey)"
-            class="dev-settings__pending"
-          >Will be cleared on save</span>
+          </div>
         </div>
+
+        <div class="dev-settings__actions">
+          <AsyncButton
+            mode="apply"
+            action-label="Save keys"
+            :disabled="!changedIn(section)"
+            @click="(done) => save(section, done)"
+          />
+        </div>
+      </template>
+    </section>
+
+    <!--
+      The prompts a queued conversation opens on. They are per person and they are text, so they
+      are edited here rather than declared: see prompts.ts, which holds the defaults and what a
+      placeholder in one can stand for.
+    -->
+    <section class="dev-settings__card">
+      <div class="dev-settings__card-head">
+        <i class="dev-settings__card-icon icon icon-comment" />
+        <div class="dev-settings__card-title">
+          <h3>Conversation prompts</h3>
+          <p>What a conversation queued from My Work opens on.</p>
+          <p class="dev-settings__card-meta">
+            {{ prompts.length }} prompts &middot; yours alone
+          </p>
+        </div>
+      </div>
+
+      <div
+        v-for="prompt in prompts"
+        :key="prompt.id"
+        class="dev-settings__field"
+      >
+        <label class="dev-settings__prompt-label">{{ prompt.label }}</label>
+        <p class="dev-settings__help">
+          {{ prompt.help }}
+        </p>
+        <textarea
+          class="dev-settings__prompt"
+          rows="6"
+          spellcheck="false"
+          :value="promptText(prompt)"
+          @input="(event) => promptEdits = { ...promptEdits, [prompt.id]: event.target.value }"
+        />
+      </div>
+
+      <p class="dev-settings__help">
+        <code>{{ placeholders }}</code> are filled in from the row the action was pressed on.
+        Anything else is left as it is written.
+      </p>
+
+      <div class="dev-settings__actions">
+        <AsyncButton
+          mode="apply"
+          action-label="Save prompts"
+          :disabled="!promptsChanged()"
+          @click="savePrompts"
+        />
       </div>
     </section>
 
-    <div class="dev-settings__actions">
-      <AsyncButton
-        mode="apply"
-        :disabled="!changed"
-        @click="save"
-      />
-    </div>
-
-    <section class="dev-settings__section">
-      <h3>Claude login</h3>
-      <p class="subheader">
-        The one login every terminal here shares, kept in dev-system/claude-credentials. It is an
-        identity rather than a setting: a terminal that logs in pushes it, and the others pull it,
-        so nothing is typed in on this page.
-      </p>
-      <p class="dev-settings__identity">
-        {{ claudeState }}
-      </p>
-    </section>
-
-    <section
-      v-if="podSa && podSa.current !== podSa.wanted"
-      class="dev-settings__section"
-    >
-      <h3>Global terminal permissions</h3>
-      <Banner color="warning">
-        The dev server's pod runs as <code>{{ podSa.current }}</code> rather than
-        <code>{{ podSa.wanted }}</code>, so a global terminal in it can reach the cluster only as
-        far as that account does. A pod takes its ServiceAccount when it starts, so this needs a
-        restart of the dev server pod, which throws away every terminal session in it. It is left
-        here to be done deliberately rather than done for you.
-      </Banner>
-    </section>
   </div>
 </template>
 
@@ -429,17 +543,97 @@ export default {
       }
     }
 
-    &__revealed {
-      font-family: monospace;
-    }
 
     &__pending {
       color: var(--warning);
     }
 
-    &__none,
-    &__identity {
+    &__none {
       color: var(--muted);
+    }
+
+    // The card, which is the harness's: a mark, a name, a line, and a summary that opens it.
+    &__card {
+      max-width:     720px;
+      margin-bottom: 20px;
+      padding:       16px;
+      border:        1px solid var(--border);
+      border-radius: var(--border-radius);
+    }
+
+    &__card-head {
+      display:     flex;
+      gap:         12px;
+      align-items: flex-start;
+    }
+
+    &__card-icon {
+      flex:      0 0 32px;
+      width:     32px;
+      height:    32px;
+      color:     var(--primary);
+      font-size: 28px;
+    }
+
+    &__card-title {
+      flex:      1 1 auto;
+      min-width: 0;
+
+      h3 {
+        margin: 0;
+      }
+
+      p {
+        margin: 2px 0 0 0;
+        color:  var(--muted);
+      }
+    }
+
+    &__card-meta {
+      font-family: monospace;
+      font-size:   12px;
+    }
+
+    // The summary line, which is a control rather than a heading: pressing it is what shows the
+    // fields, and it says what someone came to find out before they press anything.
+    &__summary {
+      display:       flex;
+      align-items:   center;
+      gap:           8px;
+      width:         100%;
+      min-height:    0;
+      margin:        12px 0 0 0;
+      padding:       8px 10px;
+      border:        1px solid var(--border);
+      border-radius: var(--border-radius);
+      background:    transparent;
+      color:         var(--body-text);
+      font:          inherit;
+      text-align:    left;
+      cursor:        pointer;
+
+      &:hover {
+        background: var(--nav-hover, var(--accent-btn));
+      }
+    }
+
+    &__prompt-label {
+      display:     block;
+      margin-top:  10px;
+      font-weight: 600;
+    }
+
+    &__prompt {
+      display:       block;
+      width:         100%;
+      padding:       8px 10px;
+      border:        1px solid var(--border);
+      border-radius: var(--border-radius);
+      background:    var(--body-bg);
+      color:         var(--body-text);
+      font-family:   monospace;
+      font-size:     12px;
+      resize:        vertical;
     }
 
     &__actions {

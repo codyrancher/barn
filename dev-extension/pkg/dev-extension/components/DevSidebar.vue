@@ -6,33 +6,31 @@
 // is impossible, and it has no per-row slot, so a delete control is impossible. Both are on
 // every row of the thing this is a port of.
 //
-// Neither `nav/Type.vue` nor `nav/Group.vue` is wrapped here, and both were tried:
-//
-//   - Type renders its own `<li>`. A row needs a dot before the link and a delete after it, so
-//     wrapping Type puts an `<li>` inside an `<li>`, which is invalid markup and laid the two
-//     rails out differently in each row. Its label inset also comes from rules that only exist
-//     inside Group's stylesheet, so outside the nav it is 3px adrift of everything else.
-//   - Group renders its children through Type itself with no slot between them, so a Group
-//     section cannot carry a dot or a delete on a row either.
-//
-// What is taken from them instead is their metrics, which is the part worth keeping: a 33px
-// row, a 16px left inset, 14px labels on a 16px line, all read out of the shell's own nav
-// styles rather than picked by eye.
-//
-// Everything else is the shell's. Colours, spacing and type come from Rancher's own variables,
-// the icons are Rancher's icon font, the create control is RcButton, the tooltips are the
-// shell's directive, and the state colours are the same `colorForState` the tables and badges
-// use. Where the harness and Rancher disagree on a colour, this takes Rancher's.
-import { colorForState, stateDisplay } from '@shell/plugins/dashboard-store/resource-class';
-import { listWorkspaces, deleteWorkspace } from '../api';
+// The rows themselves are DevList, which is also the conversation list inside a workspace. What
+// is left here is what is particular to the nav: which sections there are, what a row links to,
+// and the strip of everything that is not a workspace along the foot.
+import {
+  listAllWorkspaces, deleteWorkspace, listClusters, readableBytes
+} from '../api';
 import { showTerminal } from '../terminals';
 import { TEMPLATES } from '../templates';
+import DevList from './DevList.vue';
 import {
   DEV_PRODUCT, BLANK_CLUSTER, WORKSPACE_ROUTE, CREATE_ROUTE, WORKSPACES_ROUTE,
   MY_WORK_ROUTE, INSIGHTS_ROUTE, SETTINGS_ROUTE
 } from '../config/constants';
 
 const REFRESH_MS = 5000;
+
+/**
+ * What counts as a cluster running low.
+ *
+ * A workspace clones rancher/dashboard, installs it and compiles it: that is gigabytes of disk
+ * and a compile that has been given four of memory. These are the numbers under which starting
+ * one is a thing that fails partway rather than a thing that is slow.
+ */
+const LOW_MEMORY = 4 * 1024 ** 3;
+const LOW_DISK = 20 * 1024 ** 3;
 
 // The sidebar is rebuilt on every navigation, because the router-view above it is keyed on the
 // path. Without this the list blinks empty and fills in again on every click, which is the
@@ -42,13 +40,14 @@ let cached = [];
 export default {
   name: 'DevSidebar',
 
+  components: { DevList },
+
   data() {
     return {
       workspaces:   cached,
+      clusters:     [],
       templates:    TEMPLATES,
       error:        '',
-      // The workspace a delete has been asked for, so the row can ask before it does it.
-      confirming:   '',
       refreshTimer: null,
       /**
        * The entries that are not workspaces, as an icon row at the foot.
@@ -58,12 +57,15 @@ export default {
        * shell has: it is a list, and Rancher's `user` icon already means an account elsewhere
        * in the product, which My Work is not.
        *
-       * Terminal is not among them: it is not a page, it is the drawer, and it opens in place.
+       * My Work first, because it is the page somebody opens the product to look at. Terminal is
+       * in the row rather than before it, and it is the one entry that is not a page: it opens
+       * the drawer in place, which is why it carries an action instead of a route.
        */
       globals: [
         {
           label: 'My Work', icon: 'icon-list-flat', route: MY_WORK_ROUTE
         },
+        { label: 'Terminal', icon: 'icon-terminal', action: 'terminal' },
         {
           label: 'Insights', icon: 'icon-monitoring', route: INSIGHTS_ROUTE
         },
@@ -75,19 +77,75 @@ export default {
   },
 
   computed: {
-    /** Every template, with the workspaces made from it. A template with none still shows. */
+    /**
+     * A section per cluster, with the workspaces hosted on it.
+     *
+     * By cluster rather than by template, because that is the thing a person is choosing between
+     * when they have workspaces in two places: a template says what a workspace runs, which the
+     * row's own page says too, and a cluster says where it is, which nothing else did.
+     *
+     * Every cluster gets a section even with nothing in it, so the plus that makes one there is
+     * somewhere to press.
+     */
     sections() {
+      const clusters = this.clusters.length ? this.clusters : [{ id: 'local', name: 'local' }];
+      const known = new Set(clusters.map((cluster) => cluster.id));
+      const strays = [...new Set(this.workspaces.map((workspace) => workspace.cluster))]
+        .filter((id) => id && !known.has(id))
+        .map((id) => ({
+          id, name: id, memoryFree: 0, diskFree: 0
+        }));
+      const all = [...clusters, ...strays];
+
+      // Template, then cluster, then workspaces. Two levels because they answer two questions
+      // that are both worth asking: a template says what a workspace runs, and a cluster says
+      // where it is. A cluster with nothing of this template in it is still listed, because the
+      // plus on it is how one gets made there.
       return this.templates.map((template) => ({
         ...template,
-        workspaces: this.workspaces.filter((workspace) => workspace.template === template.id),
+        clusters: all.map((cluster) => ({
+          ...cluster,
+          rows: this.rowsFor(this.workspaces.filter((workspace) => (
+            workspace.cluster === cluster.id && workspace.template === template.id
+          ))),
+        })),
       }));
     },
 
-    /** Workspaces whose template is gone, so they cannot become invisible by losing it. */
+    /**
+     * Workspaces whose template is gone, grouped the same way.
+     *
+     * A template removed from the code must not take its workspaces off the page with it: they
+     * are still running and somebody still has to be able to delete them.
+     */
     orphans() {
-      const known = this.templates.map((template) => template.id);
+      const known = new Set(this.templates.map((template) => template.id));
+      const lost = this.workspaces.filter((workspace) => !known.has(workspace.template));
 
-      return this.workspaces.filter((workspace) => !known.includes(workspace.template));
+      if (!lost.length) {
+        return [];
+      }
+
+      return [...new Set(lost.map((workspace) => workspace.cluster))].map((id) => ({
+        id,
+        name:       id,
+        memoryFree: 0,
+        diskFree:   0,
+        rows:       this.rowsFor(lost.filter((workspace) => workspace.cluster === id)),
+      }));
+    },
+
+    /**
+     * The most any one cluster has, which is what the bars are drawn against.
+     *
+     * A bar has to be a proportion of something. Against a cluster's own capacity every cluster
+     * would look equally full; against the largest, two clusters side by side compare.
+     */
+    biggest() {
+      return {
+        memory: Math.max(...this.sections.map((section) => section.memoryFree || 0), 1),
+        disk:   Math.max(...this.sections.map((section) => section.diskFree || 0), 1),
+      };
     },
 
     currentWorkspace() {
@@ -110,32 +168,69 @@ export default {
   methods: {
     async refresh() {
       try {
-        this.workspaces = await listWorkspaces();
-        cached = this.workspaces;
+        const [workspaces, clusters] = await Promise.all([
+          listAllWorkspaces(),
+          listClusters().catch(() => this.clusters),
+        ]);
+
+        this.workspaces = workspaces;
+        this.clusters = clusters;
+        cached = workspaces;
       } catch { /* the next poll will say if it is more than a blip */ }
     },
 
-    workspaceTo(workspace) {
+    /**
+     * Whether a cluster is running out of room, which is what colours its name.
+     *
+     * The thresholds are what a workspace of this product actually needs rather than a round
+     * number: a checkout, an install and a compile of rancher/dashboard want a few gigabytes of
+     * each, and a cluster under that will take one and then fail in the middle of yarn.
+     */
+    low(cluster) {
+      return (cluster.memoryFree && cluster.memoryFree < LOW_MEMORY) ||
+        (cluster.diskFree && cluster.diskFree < LOW_DISK);
+    },
+
+    /** How full a bar is, as a percentage of the largest cluster's own capacity. */
+    bar(free, total) {
+      return `${ Math.max(2, Math.min(100, Math.round((free / (total || free || 1)) * 100))) }%`;
+    },
+
+    readable(value) {
+      return readableBytes(value);
+    },
+
+    /** Every workspace, asked for rather than landed on. See the Workspaces page. */
+    listTo() {
       return {
-        name:   WORKSPACE_ROUTE,
-        params: { product: DEV_PRODUCT, cluster: BLANK_CLUSTER, workspace: workspace.name },
+        name:   WORKSPACES_ROUTE,
+        params: { product: DEV_PRODUCT, cluster: BLANK_CLUSTER },
+        query:  { all: null },
       };
     },
 
-    /**
-     * Create, from the section that already knows which template it is.
-     *
-     * The template is the section, so the create page is opened with it chosen and asks only
-     * for the name. This is the only way in: the Workspaces page's own button opens the same
-     * page with the same query.
-     */
-    createTo(template) {
+    /** The create page, with this cluster already chosen. */
+    createIn(cluster, template) {
       return {
         name:   CREATE_ROUTE,
         params: { product: DEV_PRODUCT, cluster: BLANK_CLUSTER },
-        query:  { template: template.id },
+        query:  { cluster: cluster.id, template },
       };
     },
+
+    /** A workspace as a row: its name, its state, and the page it opens. */
+    rowsFor(workspaces) {
+      return workspaces.map((workspace) => ({
+        key:   workspace.name,
+        label: workspace.name,
+        state: workspace.state,
+        to:    {
+          name:   WORKSPACE_ROUTE,
+          params: { product: DEV_PRODUCT, cluster: BLANK_CLUSTER, workspace: workspace.name },
+        },
+      }));
+    },
+
 
     /** The drawer, not a page. See showTerminal. */
     openTerminal() {
@@ -150,33 +245,16 @@ export default {
       return this.$route.name === route;
     },
 
-    /**
-     * The dot's colour, from Rancher's own state colours, with one deliberate exception.
-     *
-     * `colorForState('stopped')` is error red, because in the rest of Rancher a stopped thing is
-     * a thing that stopped. Here it is a workspace someone pressed Stop on, which is the ordinary
-     * way to leave one, and a red dot next to it says the same thing as the red dot next to a
-     * crash loop. Muted is what the nav already uses for "nothing to report".
-     */
-    dotClass(workspace) {
-      return workspace.state === 'stopped' ? 'text-muted' : colorForState(workspace.state);
-    },
-
-    stateLabel(workspace) {
-      return stateDisplay(workspace.state);
-    },
-
-    async remove(workspace) {
+    async remove(name) {
       this.error = '';
-      this.confirming = '';
 
       try {
-        await deleteWorkspace(workspace.name);
+        await deleteWorkspace(name);
         await this.refresh();
 
         // Standing on a workspace that has just been deleted is standing on a page that is
         // about to say it does not exist.
-        if (this.currentWorkspace === workspace.name) {
+        if (this.currentWorkspace === name) {
           this.$router.push({ name: WORKSPACES_ROUTE, params: { product: DEV_PRODUCT, cluster: BLANK_CLUSTER } });
         }
       } catch (e) {
@@ -190,126 +268,89 @@ export default {
 <template>
   <nav class="dev-sidebar">
     <div class="dev-sidebar__scroll">
-      <section
-        v-for="section in sections"
-        :key="section.id"
-        class="dev-sidebar__section"
+      <!--
+        The template, and under it the clusters its workspaces are on. The heading is not a
+        DevList: a template has no rows of its own, and a list with nothing in it would draw an
+        empty line under every one of them.
+      -->
+      <div
+        v-for="template in sections"
+        :key="template.id"
+        class="dev-sidebar__template"
       >
-        <div class="dev-sidebar__head">
+        <!--
+          The heading is a link to the list of every workspace, which is where one is stopped or
+          deleted. The landing route redirects into a workspace, so without this the list is a
+          page nothing reaches.
+        -->
+        <router-link
+          class="dev-sidebar__template-head"
+          :to="listTo"
+        >
           <i
-            class="dev-sidebar__glyph icon"
-            :class="section.icon"
+            class="dev-sidebar__template-icon icon"
+            :class="template.icon"
           />
-          <span class="dev-sidebar__label">{{ section.label }}</span>
-          <!--
-            Quiet until the pointer is in the section, or until it is focused, which is the
-            same rule the row's delete follows. It keeps its place in the layout either way, so
-            the label does not move when it appears, and it stays in the tab order, because
-            hidden-until-hover is unusable from a keyboard if it is the only way to create a
-            workspace.
-          -->
-          <router-link
-            v-clean-tooltip="`New ${ section.label } workspace`"
-            class="dev-sidebar__control dev-sidebar__control--bordered dev-sidebar__reveal"
-            :aria-label="`New ${ section.label } workspace`"
-            :to="createTo(section)"
-          >
-            <i class="icon icon-plus" />
-          </router-link>
-        </div>
+          <span class="dev-sidebar__template-label">{{ template.label }}</span>
+        </router-link>
 
-        <ul>
-          <li
-            v-for="workspace in section.workspaces"
-            :key="workspace.name"
-            :class="{ 'dev-sidebar__row--current': workspace.name === currentWorkspace }"
-            class="dev-sidebar__row"
-          >
-            <router-link
-              class="dev-sidebar__link"
-              :to="workspaceTo(workspace)"
-            >
-              <!--
-                The state class goes on the wrapper and the glyph reads it back through
-                currentColor, which is what lets the stylesheet adjust it for the theme without
-                knowing which state it is. See the __dot rule.
-              -->
-              <span
-                v-clean-tooltip="stateLabel(workspace)"
-                class="dev-sidebar__glyph dev-sidebar__dot"
-                :class="dotClass(workspace)"
-              ><i class="icon icon-dot" /></span>
-              <span class="dev-sidebar__name">{{ workspace.name }}</span>
-            </router-link>
-            <button
-              v-if="confirming !== workspace.name"
-              v-clean-tooltip="`Delete ${ workspace.name }`"
-              type="button"
-              class="dev-sidebar__control dev-sidebar__reveal dev-sidebar__delete"
-              :aria-label="`Delete ${ workspace.name }`"
-              @click="confirming = workspace.name"
-            >
-              <i class="icon icon-trash" />
-            </button>
-            <button
-              v-else
-              v-clean-tooltip="`Confirm deleting ${ workspace.name }`"
-              type="button"
-              class="dev-sidebar__control dev-sidebar__delete dev-sidebar__delete--confirm"
-              :aria-label="`Confirm deleting ${ workspace.name }`"
-              @click="remove(workspace)"
-            >
-              <i class="icon icon-checkmark" />
-            </button>
-          </li>
-
-          <li
-            v-if="!section.workspaces.length"
-            class="dev-sidebar__empty"
-          >
-            None yet
-          </li>
-        </ul>
-      </section>
+        <DevList
+          v-for="section in template.clusters"
+          :key="section.id"
+          class="dev-sidebar__cluster"
+          :label="section.name"
+          icon="icon-cluster"
+        :tone="low(section) ? 'warning' : ''"
+        :rows="section.rows"
+        :current="currentWorkspace"
+        :create-to="createIn(section, template.id)"
+        :create-label="`New ${ template.label } workspace on ${ section.name }`"
+        deletable
+        @delete="remove"
+      >
+        <!-- What is left on it, as two bars, while the pointer is on the name. -->
+        <template #popover>
+          <div class="dev-sidebar__meter">
+            <span class="dev-sidebar__meter-label">MEM</span>
+            <span class="dev-sidebar__meter-track"><span
+              class="dev-sidebar__meter-fill"
+              :style="{ width: bar(section.memoryFree, biggest.memory) }"
+            /></span>
+            <span class="dev-sidebar__meter-value">{{ readable(section.memoryFree) }}</span>
+          </div>
+          <div class="dev-sidebar__meter">
+            <span class="dev-sidebar__meter-label">DISK</span>
+            <span class="dev-sidebar__meter-track"><span
+              class="dev-sidebar__meter-fill"
+              :style="{ width: bar(section.diskFree, biggest.disk) }"
+            /></span>
+            <span class="dev-sidebar__meter-value">{{ readable(section.diskFree) }}</span>
+          </div>
+        </template>
+        </DevList>
+      </div>
 
       <!-- A workspace whose template has been removed from the code still has to be reachable. -->
-      <section
+      <div
         v-if="orphans.length"
-        class="dev-sidebar__section"
+        class="dev-sidebar__template"
       >
-        <div class="dev-sidebar__head">
-          <i class="dev-sidebar__glyph icon icon-warning" />
-          <span class="dev-sidebar__label">Unknown template</span>
+        <div class="dev-sidebar__template-head">
+          <i class="dev-sidebar__template-icon icon icon-warning" />
+          <span class="dev-sidebar__template-label">Unknown template</span>
         </div>
-        <ul>
-          <li
-            v-for="workspace in orphans"
-            :key="workspace.name"
-            :class="{ 'dev-sidebar__row--current': workspace.name === currentWorkspace }"
-            class="dev-sidebar__row"
-          >
-            <router-link
-              class="dev-sidebar__link"
-              :to="workspaceTo(workspace)"
-            >
-              <span
-                v-clean-tooltip="stateLabel(workspace)"
-                class="dev-sidebar__glyph dev-sidebar__dot"
-                :class="dotClass(workspace)"
-              ><i class="icon icon-dot" /></span>
-              <span class="dev-sidebar__name">{{ workspace.name }}</span>
-            </router-link>
-            <button
-              type="button"
-              class="dev-sidebar__control dev-sidebar__reveal dev-sidebar__delete"
-              :aria-label="`Delete ${ workspace.name }`"
-              @click="remove(workspace)"
-            >
-              <i class="icon icon-trash" />
-            </button>
-          </li>
-        </ul>
-      </section>
+        <DevList
+          v-for="section in orphans"
+          :key="section.id"
+          class="dev-sidebar__cluster"
+          :label="section.name"
+          icon="icon-cluster"
+          :rows="section.rows"
+          :current="currentWorkspace"
+          deletable
+          @delete="remove"
+        />
+      </div>
     </div>
 
     <div
@@ -321,39 +362,43 @@ export default {
 
     <!-- The things that are not workspaces, out of the way of the things that are. -->
     <div class="dev-sidebar__globals">
-      <button
-        v-clean-tooltip="'Terminal'"
-        type="button"
-        aria-label="Terminal"
-        @click="openTerminal"
-      >
-        <i class="icon icon-terminal" />
-      </button>
-      <router-link
+      <template
         v-for="global in globals"
-        :key="global.route"
-        v-clean-tooltip="global.label"
-        :to="globalTo(global.route)"
-        :aria-label="global.label"
-        :class="{ 'dev-sidebar__globals--current': isGlobalActive(global.route) }"
+        :key="global.label"
       >
-        <i
-          class="icon"
-          :class="global.icon"
-        />
-      </router-link>
+        <button
+          v-if="global.action"
+          v-clean-tooltip="global.label"
+          type="button"
+          :aria-label="global.label"
+          @click="openTerminal"
+        >
+          <i
+            class="icon"
+            :class="global.icon"
+          />
+        </button>
+        <router-link
+          v-else
+          v-clean-tooltip="global.label"
+          :to="globalTo(global.route)"
+          :aria-label="global.label"
+          :class="{ 'dev-sidebar__globals--current': isGlobalActive(global.route) }"
+        >
+          <i
+            class="icon"
+            :class="global.icon"
+          />
+        </router-link>
+      </template>
     </div>
   </nav>
 </template>
 
 <style lang="scss" scoped>
-  // Every number here is Rancher's own: the shell's nav rows are 33px tall with a 16px left
-  // inset and 14px labels on a 16px line (components/nav/Group.vue), and $space-s is its small
-  // step. Nothing is picked to match a screenshot.
-  $row-height: 33px;
-  $rail: 16px;      // the left inset, and the width of the icon slot
-  $gap: 8px;        // icon slot to label, and the right inset
-  $control: 22px;   // the right-hand control, the same box in both kinds of row
+  // Rancher's own step, the same one DevList's metrics come from.
+  $rail: 16px;
+  $gap: 8px;
 
   .dev-sidebar {
     display:        flex;
@@ -367,203 +412,87 @@ export default {
     &__scroll {
       flex:       1 1 auto;
       overflow-y: auto;
+      // Nothing here is meant to be scrolled sideways: a name too long for the column is
+      // truncated, and a popover is sized to fit it.
+      overflow-x: hidden;
     }
 
-    ul {
-      margin:     0;
-      padding:    0;
-      list-style: none;
-    }
-
-    // The two kinds of row are the same box: same height, same insets, same three columns.
-    // A div rather than a <header> element, because the shell styles bare HEADERs globally and
-    // one of those rules is a 48px height.
-    &__head,
-    &__row {
-      display:       flex;
-      align-items:   center;
-      box-sizing:    border-box;
-      width:         100%;
-      height:        $row-height;
-      margin:        0;
-      padding:       0 $gap 0 $rail;
-    }
-
-    &__head {
-      border-top: 1px solid var(--nav-border, var(--border));
-
-      .dev-sidebar__glyph {
-        color:     var(--primary);
-        font-size: 14px;
-      }
-    }
-
-    // The left rail: the section's icon and a row's state dot are the same box, so they share
-    // one vertical line, and the labels after them share another.
-    &__glyph {
-      flex:        0 0 $rail;
-      width:       $rail;
-      margin-right: $gap;
-      text-align:  left;
-    }
-
-    &__label {
-      flex:           1 1 auto;
-      min-width:      0;
-      overflow:       hidden;
-      color:          var(--muted);
-      font-size:      12px;
-      font-weight:    600;
-      letter-spacing: 0.05em;
-      text-transform: uppercase;
-      text-overflow:  ellipsis;
-      white-space:    nowrap;
-      // A section heading is not a link and must not pick one's underline up from anywhere.
-      text-decoration: none;
-    }
-
-    // One colour for every workspace name, whatever state it is in: a stopped workspace is
-    // still one whose name you are trying to read. State is the dot's job and only the dot's.
-    &__link {
+    // The template, above the clusters its workspaces are on. Same metrics as a DevList heading,
+    // because it is the same kind of line one level up.
+    &__template-head {
       display:         flex;
       align-items:     center;
-      flex:            1 1 auto;
-      min-width:       0;
-      height:          100%;
-      color:           var(--body-text);
-      font-size:       14px;
-      line-height:     16px;
+      height:          33px;
+      padding:         0 $gap 0 $rail;
+      border-top:      1px solid var(--nav-border, var(--border));
       text-decoration: none;
 
-      &:hover,
-      &:focus {
+      &:hover {
+        background:      var(--nav-hover, var(--accent-btn));
         text-decoration: none;
       }
     }
 
-    &__row {
-      .icon-dot {
-        font-size:   8px;
-        line-height: 1;
-      }
+    &__template-icon {
+      flex:         0 0 $rail;
+      width:        $rail;
+      margin-right: $gap;
+      color:        var(--primary);
+      font-size:    14px;
+    }
 
-      &:hover {
-        background: var(--nav-hover, var(--accent-btn));
-      }
+    &__template-label {
+      overflow:        hidden;
+      color:           var(--body-text);
+      font-size:       12px;
+      font-weight:     600;
+      letter-spacing:  0.05em;
+      text-transform:  uppercase;
+      text-overflow:   ellipsis;
+      white-space:     nowrap;
+    }
 
-      // Selected is a background and a weight, not a colour. Rancher's own nav pairs
-      // --active-nav with --on-active, but only the second is defined in every theme here, and
-      // taking one without the other is how a selected row ends up white on white.
-      &--current {
-        background: var(--nav-hover, var(--accent-btn));
+    // The clusters under it, indented by one rail so the nesting is visible without a line.
+    &__cluster {
+      padding-left: $rail;
+    }
 
-        .dev-sidebar__link {
-          font-weight: 600;
-        }
+    // The two bars in a cluster's popover: a label, a track, and the number, on one line each.
+    &__meter {
+      display:       flex;
+      align-items:   center;
+      gap:           8px;
+      margin-bottom: 4px;
+
+      &:last-child {
+        margin-bottom: 0;
       }
     }
 
-    // The state dot, pulled toward the body text until it is legible on the body background.
-    //
-    // Rancher's state colours are not theme-aware: --success is rgb(0, 112, 50) in both themes,
-    // and only the background moves, so on the dark nav it measures 2.36:1 where a graphical
-    // object needs 3:1. --error and --primary have the same problem. There is no token to switch
-    // to either: the click-badge family is white for error and info in both themes, and the gauge
-    // colours are a different vocabulary.
-    //
-    // So the state colour is kept and mixed toward --body-text, which is the one colour each
-    // theme guarantees against its own background. In dark that lightens it, in light it deepens
-    // it, and the direction is right in both without this file knowing which theme it is in or
-    // inventing a colour of its own. A browser without color-mix ignores the declaration and gets
-    // the state colour unchanged, which is where this started.
-    // currentColor in a `color` declaration is the inherited value, so this is the state colour
-    // the span carries (text-success and the rest) mixed toward the theme's body text, rather
-    // than a second copy of Rancher's palette written out here.
-    &__dot .icon-dot {
-      color: color-mix(in srgb, currentColor, var(--body-text) 45%);
+    &__meter-label {
+      flex:        0 0 34px;
+      color:       var(--muted);
+      font-family: monospace;
+      font-size:   11px;
     }
 
-    // The name, truncated rather than wrapped: a row is one line and a workspace name can be
-    // forty characters. It shrinks before the control does, so a long name never runs under it.
-    &__name {
+    &__meter-track {
+      flex:          1 1 auto;
       overflow:      hidden;
-      text-overflow: ellipsis;
-      white-space:   nowrap;
+      height:        6px;
+      border-radius: 3px;
+      background:    var(--border);
     }
 
-    // The right-hand control of either row: one box, one column, one place.
-    //
-    // `min-height` as well as `height`, because one of the shell's global BUTTON rules sets a
-    // 40px minimum and a minimum beats a height. Without it the row's delete is a 22x40 box
-    // against the section's 22x22 plus, and the two rails stop lining up.
-    &__control {
-      display:         flex;
-      align-items:     center;
-      justify-content: center;
-      flex:            0 0 $control;
-      width:           $control;
-      height:          $control;
-      min-height:      $control;
-      padding:         0;
-      border:          none;
-      border-radius:   var(--border-radius);
-      background:      transparent;
-      color:           var(--muted);
-      cursor:          pointer;
-
-      .icon {
-        font-size: 12px;
-      }
+    &__meter-fill {
+      display:    block;
+      height:     100%;
+      background: var(--primary);
     }
 
-    // The create control, outlined so it reads as a button rather than as another row icon.
-    //
-    // Both colours here are foreground tokens rather than --primary and --border, and that is
-    // the point: --primary on the nav background is 2.93:1 in dark, and --border is about 1.4:1
-    // in both themes, which is a control nobody can see with a glyph nobody can read. --muted
-    // and --body-text are the two colours this nav already uses for text, so they are legible on
-    // it by construction.
-    &__control--bordered {
-      border: 1px solid var(--muted);
-      color:  var(--body-text);
-
-      &:hover {
-        background: var(--nav-hover, var(--accent-btn));
-      }
-    }
-
-    // Quiet until you are near the thing it acts on, and always there for a keyboard. Opacity
-    // rather than display, so the row's layout is the same whether it is showing or not.
-    &__reveal {
-      opacity: 0;
-
-      &:focus-visible {
-        opacity: 1;
-      }
-    }
-
-    &__section:hover &__head &__reveal,
-    &__row:hover &__reveal {
-      opacity: 1;
-    }
-
-    &__delete {
-      &:hover,
-      &:focus-visible {
-        opacity: 1;
-        color:   var(--error);
-      }
-
-      &--confirm {
-        opacity: 1;
-        color:   var(--error);
-      }
-    }
-
-    &__empty {
-      padding:   0 $gap ($gap / 2) calc(#{$rail} + #{$rail} + #{$gap});
-      color:     var(--muted);
-      font-size: 12px;
+    &__meter-value {
+      flex:      0 0 auto;
+      font-size: 11px;
     }
 
     &__error {
@@ -602,6 +531,14 @@ export default {
         line-height:     1;
         appearance:      none;
         cursor:          pointer;
+        // These are icons, and the shell underlines every anchor on hover. An underline under a
+        // glyph is a line under a picture.
+        text-decoration: none;
+
+        &:hover,
+        &:focus {
+          text-decoration: none;
+        }
 
         .icon {
           font-size: 16px;
