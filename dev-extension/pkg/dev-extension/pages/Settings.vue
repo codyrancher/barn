@@ -13,9 +13,12 @@
 //     whoever walks past.
 //   - saving writes only the fields that were touched, so opening this page and pressing Save
 //     cannot blank a key nobody could see.
-//   - a generated secret is different in kind: the product made it up, and a password you cannot
-//     read is a password you cannot log in with. Those have a Show, and they say they are
-//     generated rather than pretending someone chose them.
+//   - a generated secret is different in kind, and this is the deliberate exception to the rule
+//     above rather than an oversight in it. The rule exists so that a value someone entrusted to
+//     this page cannot be read back out of it; a value the product invented was never anyone's
+//     secret, and a password you cannot read is a password you cannot log in with. So: never
+//     render back what a person typed, always allow reading what the product generated. Those
+//     fields say they are generated rather than pretending someone chose them.
 //
 // The claude login is on this page too, as an identity rather than a secret: who it is and
 // whether it is still valid, never the token.
@@ -50,8 +53,10 @@ export default {
       claude:   null,
       podSa:    null,
       // Key to the string typed into its field. A key that is not in here was not touched, and
-      // is not written on Save.
+      // is not written on Save. An empty field is never in here: clearing is what Clear is for.
       edits:    {},
+      // Keys Clear was pressed on, which is the only thing that writes an empty value.
+      cleared:  [],
       // Key to the value of a generated secret, once Show has been pressed for it.
       revealed: {},
       error:    '',
@@ -85,7 +90,18 @@ export default {
     },
 
     changed() {
-      return Object.keys(this.edits).length > 0;
+      return Object.keys(this.edits).length > 0 || this.cleared.length > 0;
+    },
+
+    /** What Save will write: the fields that were typed into, and the keys Clear was pressed on. */
+    writes() {
+      const out = { ...this.edits };
+
+      for (const key of this.cleared) {
+        out[key] = '';
+      }
+
+      return out;
     },
 
     claudeState() {
@@ -146,28 +162,32 @@ export default {
     },
 
     /**
-     * Something was typed. An empty field is only a change if it was not empty a moment ago,
-     * which is what stops a field that has never been touched from reading as a clear.
+     * Something was typed.
+     *
+     * An empty field is never a change, whatever it was a moment ago. Typing a character into a
+     * field whose key is set and deleting it again used to leave an empty edit behind, and an
+     * empty value is a deliberate clear, so one stray keystroke and a Save destroyed a token
+     * nobody could see. Clearing has a button of its own; the field only ever sets a value.
      */
     edit(secret, value) {
       const edits = { ...this.edits };
 
-      if (value === '' && !(secret.storeKey in edits)) {
-        return;
-      }
-
-      if (value === '' && !secret.set) {
+      if (value === '') {
         delete edits[secret.storeKey];
       } else {
         edits[secret.storeKey] = value;
       }
 
       this.edits = edits;
+      this.cleared = this.cleared.filter((key) => key !== secret.storeKey);
     },
 
-    /** An explicit clear, which is a write of '' rather than an untouched field. */
+    /** An explicit clear, which is the only thing that writes an empty value. */
     clear(secret) {
-      this.edits = { ...this.edits, [secret.storeKey]: '' };
+      if (!this.cleared.includes(secret.storeKey)) {
+        this.cleared = [...this.cleared, secret.storeKey];
+      }
+
       this.hide(secret);
     },
 
@@ -176,8 +196,9 @@ export default {
       this.saved = false;
 
       try {
-        await saveSecrets(this.edits);
+        await saveSecrets(this.writes);
         this.edits = {};
+        this.cleared = [];
         this.revealed = {};
         await this.refresh();
         this.saved = true;
@@ -308,7 +329,7 @@ export default {
             Clear
           </RcButton>
           <span
-            v-if="edits[secret.storeKey] === ''"
+            v-if="cleared.includes(secret.storeKey)"
             class="dev-settings__pending"
           >Will be cleared on save</span>
         </div>

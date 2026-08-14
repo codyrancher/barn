@@ -18,6 +18,7 @@
 import {
   templateById, DevTemplate, DevSidecar, GLOBAL_SECRETS
 } from './templates';
+import { MANAGER_RULES } from './rancher-sidecar';
 import { WORKSPACE_VUE_CONFIG, WORKSPACE_CONFIG_MOUNT } from './workspace-config';
 
 // The `local` cluster, like the pod this dev server runs in. The product shows no cluster
@@ -28,6 +29,13 @@ const BASE = `/k8s/clusters/${ CLUSTER }`;
 /** Everything a workspace owns carries these, and the list is built by filtering on them. */
 export const LABEL_WORKSPACE = 'dev.rancher.io/workspace';
 export const LABEL_TEMPLATE = 'dev.rancher.io/template';
+/**
+ * Which sidecar a Deployment, Service or pod is, when it is one.
+ *
+ * Declared here with the other two rather than beside the sidecar code, because its absence is
+ * what identifies the workspace's own objects. See ownedByWorkspace.
+ */
+export const LABEL_SIDECAR = 'dev.rancher.io/sidecar';
 
 /**
  * Ask Steve for the labelled things only, rather than for everything.
@@ -88,6 +96,8 @@ export interface DevWorkspace {
 export interface DevService {
   name: string;
   port: number;
+  /** The port it is published on the node at, when the template asked for an origin of its own. */
+  nodePort: number;
 }
 
 // Steve hands back plain JSON with no types worth importing, and narrowing it here would only
@@ -290,6 +300,25 @@ function workspaceFrom(namespace: Json, deployment: Json | undefined, pod?: Json
 }
 
 /**
+ * Whether a Deployment or a pod is the workspace itself rather than one of its sidecars.
+ *
+ * A sidecar carries the workspace's label too, deliberately, so that everything a workspace owns
+ * can be found by one filter. That makes the label alone the wrong question here, and the two
+ * readers of it answered differently: the list built a map with `set` in a loop, so the last
+ * sidecar in the collection won, while the detail page used `find`, so the first did. A workspace
+ * that had been stopped for an hour read Running in the list, with Stop offered, while its own
+ * page offered Start.
+ *
+ * One predicate for both, and the absence of the sidecar label is what it asks, so a sidecar can
+ * never be mistaken for the workspace whatever order the collection arrives in.
+ */
+function ownedByWorkspace(candidate: Json, name: string): boolean {
+  const labels = candidate?.metadata?.labels || {};
+
+  return labels[LABEL_WORKSPACE] === name && !labels[LABEL_SIDECAR];
+}
+
+/**
  * Every workspace in the cluster.
  *
  * The namespace is the record of a workspace and the Deployment is its state, so both are
@@ -313,7 +342,7 @@ export async function listWorkspaces(): Promise<DevWorkspace[]> {
   for (const deployment of deployments.data || []) {
     const workspace = deployment.metadata?.labels?.[LABEL_WORKSPACE];
 
-    if (workspace) {
+    if (workspace && ownedByWorkspace(deployment, workspace)) {
       byWorkspace.set(workspace, deployment);
     }
   }
@@ -321,7 +350,7 @@ export async function listWorkspaces(): Promise<DevWorkspace[]> {
   for (const pod of pods?.data || []) {
     const workspace = pod.metadata?.labels?.[LABEL_WORKSPACE];
 
-    if (workspace) {
+    if (workspace && ownedByWorkspace(pod, workspace)) {
       podByWorkspace.set(workspace, pod);
     }
   }
@@ -362,10 +391,8 @@ export async function getWorkspace(name: string): Promise<DevWorkspace | null> {
     return null;
   }
 
-  const deployment = (deployments?.data || [])
-    .find((candidate: Json) => candidate.metadata?.labels?.[LABEL_WORKSPACE] === name);
-  const pod = (pods?.data || [])
-    .find((candidate: Json) => candidate.metadata?.labels?.[LABEL_WORKSPACE] === name);
+  const deployment = (deployments?.data || []).find((candidate: Json) => ownedByWorkspace(candidate, name));
+  const pod = (pods?.data || []).find((candidate: Json) => ownedByWorkspace(candidate, name));
 
   return workspaceFrom(record, deployment, pod);
 }
@@ -400,7 +427,7 @@ function deploymentBody(name: string, template: DevTemplate): Json {
             // is reached at, which contains its own name.
             env:   Object.entries(template.env || {}).map(([envName, value]) => ({
               name:  envName,
-              value: value.replace('{{proxyPath}}', workspaceProxyUrl(name, template.port, template.scheme)),
+              value: value.replace('{{proxyPath}}', template.ownOrigin ? '' : workspaceProxyUrl(name, template.port, template.scheme)),
             })),
             // The workspace's own secrets, by reference and as a whole Secret rather than key by
             // key. A named list would be fixed at create time, so a key added in Settings later
@@ -547,6 +574,11 @@ export async function createWorkspace(name: string, templateId: string): Promise
       kind:       'Service',
       metadata:   { namespace, name: namespace, labels },
       spec:       {
+        // NodePort rather than ClusterIP when the template needs an origin of its own, which is
+        // the whole of what "its own origin" costs: the port is open on the node to anyone who
+        // can reach it, with no Rancher session in front of it. The Browser tab says so where it
+        // offers the link.
+        ...(template.ownOrigin ? { type: 'NodePort' } : {}),
         selector: { app: namespace },
         ports:    [{ name: 'http', port: template.port, targetPort: 'http' }],
       },
@@ -572,11 +604,105 @@ export async function setWorkspaceRunning(name: string, running: boolean): Promi
     const template = templateById(deployment.metadata?.labels?.[LABEL_TEMPLATE] || '');
 
     await mirrorSecrets(name, template);
+    // And the same moment is when a workspace made before this version of the product can be
+    // brought into line: its dev server config and, if its template now asks for an origin of its
+    // own, its Service and its prefix. All three are read when the pod starts and only then.
+    await ensureWorkspaceOrigin(name, template, deployment);
   }
 
   deployment.spec.replicas = running ? 1 : 0;
 
   await devFetch(url, { method: 'PUT', body: JSON.stringify(deployment) });
+}
+
+/**
+ * Bring a workspace's Service and dev server into line with the origin its template asks for.
+ *
+ * Both halves have to agree or neither works: a dev server built with a router base of the proxy
+ * prefix hangs on its loading spinner when it is loaded at a node port (measured, and it makes no
+ * API calls at all), and one built with no prefix has every in-app link pointing at the root of
+ * Rancher's origin when it is loaded through the proxy.
+ *
+ * Done at start rather than continuously, because both are read when the pod starts, and only
+ * when something actually differs, so starting a workspace that is already right does not restart
+ * it for nothing.
+ */
+/**
+ * The dev server config a workspace boots with, brought up to date.
+ *
+ * Written on every start rather than only at create, for the reason the sidecar scripts are: the
+ * file is this repo's, the workspace copies it in on boot, and a workspace made a week ago would
+ * otherwise go on booting last week's copy for ever. It is not academic. The version that only
+ * wrote it at create left a workspace crash-looping on `DEV_PROXY_PATH must be set` after the
+ * config learned to do without one, because the pod had the old file and the new environment.
+ */
+async function ensureWorkspaceConfig(name: string): Promise<void> {
+  const namespace = workspaceNamespace(name);
+  const url = `${ BASE }/v1/configmaps/${ namespace }/${ WORKSPACE_CONFIG_MAP }`;
+  const existing = await devFetch(url).catch(() => null);
+  const data = { 'vue.config.js': WORKSPACE_VUE_CONFIG };
+
+  if (!existing) {
+    return;
+  }
+
+  if (existing.data?.['vue.config.js'] === WORKSPACE_VUE_CONFIG) {
+    return;
+  }
+
+  await devFetch(url, { method: 'PUT', body: JSON.stringify({ ...existing, data }) });
+}
+
+async function ensureWorkspaceOrigin(name: string, template: DevTemplate | undefined, deployment: Json): Promise<void> {
+  await ensureWorkspaceConfig(name);
+
+  const workspaceContainer = deployment?.spec?.template?.spec?.containers?.[0];
+
+  // A workspace created before the mirror existed has no reference to it, so nothing in it ever
+  // sees a secret however many times the mirror is rewritten. Added here rather than left to a
+  // recreate, since this is the moment the pod is about to read its environment anyway.
+  if (workspaceContainer && !workspaceContainer.envFrom) {
+    workspaceContainer.envFrom = [{ secretRef: { name: MIRROR_SECRET, optional: true } }];
+  }
+
+  if (!template?.ownOrigin) {
+    return;
+  }
+
+  const namespace = workspaceNamespace(name);
+  const serviceUrl = `${ BASE }/v1/services/${ namespace }/${ namespace }`;
+  const service = await devFetch(serviceUrl).catch(() => null);
+
+  if (service && service.spec?.type !== 'NodePort') {
+    service.spec.type = 'NodePort';
+    await devFetch(serviceUrl, { method: 'PUT', body: JSON.stringify(service) });
+  }
+
+  const container = deployment?.spec?.template?.spec?.containers?.[0];
+  const prefix = (container?.env || []).find((entry: Json) => entry.name === 'DEV_PROXY_PATH');
+
+  // Written into the object the caller is about to PUT, rather than in a PUT of its own: this
+  // runs inside setWorkspaceRunning, which is already doing a read-modify-write of the same
+  // Deployment, and two writes would be two rollouts.
+  if (prefix && prefix.value !== '') {
+    prefix.value = '';
+  }
+}
+
+/**
+ * Where a workspace is reachable when its template asked for an origin of its own.
+ *
+ * The hostname is this page's rather than the node's InternalIP, and that is the point: the
+ * browser reached Rancher at it, so it can reach the node port at it too. A node's InternalIP is
+ * frequently an address only the cluster can route to, and a link nobody can open is worse than
+ * no link.
+ */
+export function workspaceOriginUrl(service: DevService | null): string {
+  if (!service?.nodePort) {
+    return '';
+  }
+
+  return `http://${ window.location.hostname }:${ service.nodePort }/`;
 }
 
 /**
@@ -605,11 +731,14 @@ export async function deleteWorkspace(name: string): Promise<void> {
  *
  * Steve ignores labelSelector (see WORKSPACE_FILTER), so the matching is done here.
  */
-export async function findPod(namespace: string, labels: Record<string, string>): Promise<string | null> {
+export async function findPod(namespace: string, labels: Record<string, string>, own?: string): Promise<string | null> {
   const pods = await devFetch(`${ BASE }/v1/pods/${ namespace }`).catch(() => null);
 
   const running = (pods?.data || []).find((pod: Json) => (
     Object.entries(labels).every(([key, value]) => pod.metadata?.labels?.[key] === value) &&
+    // A workspace's sidecars are in its namespace and carry its label, so without this a terminal
+    // could open in whichever of them the collection happened to list first.
+    (!own || ownedByWorkspace(pod, own)) &&
     pod.status?.phase === 'Running' &&
     !pod.metadata?.deletionTimestamp
   ));
@@ -617,9 +746,9 @@ export async function findPod(namespace: string, labels: Record<string, string>)
   return running?.metadata?.name || null;
 }
 
-/** The pod running a workspace, or null while there isn't one. */
+/** The pod running a workspace itself, or null while there isn't one. */
 export function workspacePod(name: string): Promise<string | null> {
-  return findPod(workspaceNamespace(name), { [LABEL_WORKSPACE]: name });
+  return findPod(workspaceNamespace(name), { [LABEL_WORKSPACE]: name }, name);
 }
 
 /**
@@ -658,6 +787,12 @@ export async function workspaceReadyTimes(names: string[]): Promise<Record<strin
 
   for (const deployment of deployments?.data || []) {
     const name = deployment.metadata?.labels?.[LABEL_WORKSPACE];
+
+    // The workspace's own Deployment, not a sidecar's. See ownedByWorkspace.
+    if (!name || !ownedByWorkspace(deployment, name)) {
+      continue;
+    }
+
     const available = (deployment.status?.conditions || [])
       .find((condition: Json) => condition.type === 'Available' && condition.status === 'True');
 
@@ -674,7 +809,7 @@ export async function workspaceReadyTimes(names: string[]): Promise<Record<strin
     const name = pod.metadata?.labels?.[LABEL_WORKSPACE];
     const restarts = pod.status?.containerStatuses?.[0]?.restartCount || 0;
 
-    if (name && out[name]) {
+    if (name && ownedByWorkspace(pod, name) && out[name]) {
       out[name] = { ...out[name], restarts };
     }
   }
@@ -723,8 +858,17 @@ export async function workspaceEvents(names: string[]): Promise<Json[]> {
  * is the difference between "Starting up" and knowing it is four minutes into a yarn install.
  */
 export async function workspaceLogTail(name: string, pod: string): Promise<string> {
-  const namespace = workspaceNamespace(name);
-  const url = `${ BASE }/api/v1/namespaces/${ namespace }/pods/${ pod }/log?container=${ WORKSPACE_CONTAINER }&tailLines=1&timestamps=false`;
+  return podLogTail(workspaceNamespace(name), pod, WORKSPACE_CONTAINER);
+}
+
+/**
+ * The last line a container printed, or '' if there is nothing to read.
+ *
+ * Not through devFetch: this is the apiserver's log subresource, which answers text rather than
+ * JSON, and a 404 from it (a pod that has just gone) is an ordinary answer rather than an error.
+ */
+export async function podLogTail(namespace: string, pod: string, container: string): Promise<string> {
+  const url = `${ BASE }/api/v1/namespaces/${ namespace }/pods/${ pod }/log?container=${ container }&tailLines=1&timestamps=false`;
 
   try {
     const resp = await fetch(url, { cache: 'no-store' });
@@ -760,8 +904,9 @@ export async function workspaceService(name: string): Promise<DevService | null>
   }
 
   return {
-    name: service.metadata?.name,
-    port: service.spec?.ports?.[0]?.port,
+    name:     service.metadata?.name,
+    port:     service.spec?.ports?.[0]?.port,
+    nodePort: service.spec?.ports?.[0]?.nodePort || 0,
   };
 }
 
@@ -1122,16 +1267,22 @@ const SECRET_OWNER_LABEL = 'dev.rancher.io/owner';
 let secretOwner = '';
 
 /**
- * A principal id, as something a Secret name can end with.
+ * A principal id, as something a Secret can actually be named after.
  *
- * The trim is after the truncation as well as before it: a principal cut at forty characters can
- * land on a dash or a dot, and a name that ends in one is rejected by the apiserver with a
- * message about RFC 1123 that says nothing about which user it could not name.
+ * A Secret name is an RFC 1123 subdomain: lowercase letters, digits, dashes and dots, starting
+ * and ending on a letter or a digit. Underscore is not in that set, and it is not a theoretical
+ * omission: every principal that is not a local user has one. `github_user://12345678` became
+ * `dev-secrets-github_user---12345678`, which the apiserver rejects, so the save failed and every
+ * key in Settings read "Not set" for anyone who had signed in through an auth provider. Which is
+ * exactly the person the Keycloak and OpenLDAP sidecars exist for.
+ *
+ * The trim is after the truncation as well as before it, because a principal cut at forty
+ * characters can land on a dash or a dot, and a name that ends in one is rejected too.
  */
 function sanitiseOwner(value: string): string {
   return (value || 'anonymous')
     .toLowerCase()
-    .replace(/[^a-z0-9._-]/g, '-')
+    .replace(/[^a-z0-9.-]/g, '-')
     .slice(0, 40)
     .replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '') || 'anonymous';
 }
@@ -1297,15 +1448,14 @@ async function mirrorSecrets(workspace: string, template: DevTemplate | undefine
   const store = await readSecretStore();
   const mirrored: Record<string, string> = {};
 
-  // Global keys keep their name. A template's keys lose the template prefix on the way in, since
-  // inside the workspace there is only one template and `rancher.FIGMA_API_KEY` is not a name an
-  // environment variable can have.
-  for (const secret of GLOBAL_SECRETS) {
-    if (store[secret.key]) {
-      mirrored[secret.key] = encodeSecret(store[secret.key]);
-    }
-  }
-
+  // Only the template's own keys, never the global ones. A global secret is the person's rather
+  // than the workspace's: section 9 has the browser read those through Steve at the point of use,
+  // and mirroring GH_TOKEN into every workspace namespace put a personal GitHub token inside every
+  // pod a template happened to run, in a namespace where the workspace account holds `edit`.
+  //
+  // The template's keys lose the template prefix on the way in, since inside the workspace there
+  // is only one template and `rancher.FIGMA_API_KEY` is not a name an environment variable can
+  // have.
   for (const secret of template?.secrets || []) {
     const value = store[templateSecretKey(template!.id, secret.key)];
 
@@ -1351,10 +1501,19 @@ export async function migrateGithubToken(): Promise<void> {
 
   const already = await secretValue('GH_TOKEN');
 
+  if (already && already !== token) {
+    // Two different tokens, and nothing here knows which one is wanted. Both are left where they
+    // are: deleting the legacy one would destroy the only copy of a credential this code did not
+    // put anywhere, on the strength of a guess.
+    return;
+  }
+
   if (!already) {
     await saveSecrets({ GH_TOKEN: token });
   }
 
+  // Only now, when the value is certainly in the store, so a failed save cannot take the original
+  // with it.
   await devFetch(`${ BASE }/v1/secrets/${ DEV_SYSTEM_NAMESPACE }/${ GITHUB_SECRET }`, { method: 'DELETE' }).catch(() => null);
 }
 
@@ -1372,9 +1531,9 @@ export interface DevSidecarState {
    * or the controller's, whichever there is.
    */
   detail: string;
+  /** The last line it printed, while it is still starting. See listSidecars. */
+  log: string;
 }
-
-const LABEL_SIDECAR = 'dev.rancher.io/sidecar';
 
 function sidecarName(workspace: string, id: string): string {
   return `${ workspaceNamespace(workspace) }-${ id }`;
@@ -1396,13 +1555,21 @@ export async function listSidecars(workspace: string, sidecars: DevSidecar[], te
     const deployment = (deployments?.data || []).find((candidate: Json) => candidate.metadata?.name === name);
     const pod = (pods?.data || []).find((candidate: Json) => candidate.metadata?.labels?.[LABEL_SIDECAR] === sidecar.id);
 
+    const state = deployment ? stateOf({ metadata: {} }, deployment, pod) : 'stopped';
+
     out[sidecar.id] = {
-      id:    sidecar.id,
+      id: sidecar.id,
       // A sidecar that has never been started has no Deployment, which is 'stopped' rather than
       // anything more dramatic: it is declared, and starting it is what creates it.
-      state:   deployment ? stateOf({ metadata: {} }, deployment, pod) : 'stopped',
+      state,
       missing: missingSecrets(sidecar, template, keys),
       detail:  podDetail(pod) || (pod ? '' : replicaFailure(deployment)),
+      // Only while it is still coming up, and only for a sidecar that takes long enough for the
+      // question to arise. Ten minutes of "Starting up" says nothing about which minute it is in,
+      // and the manager's own log is a running account of it: which helm install, and how it went.
+      log: state === 'starting' && pod && sidecar.readyPort
+        ? await podLogTail(namespace, pod.metadata.name, 'sidecar')
+        : '',
     };
   }
 
@@ -1427,6 +1594,153 @@ function missingSecrets(sidecar: DevSidecar, template: DevTemplate | undefined, 
 
     return !template || !keys.includes(templateSecretKey(template.id, key));
   });
+}
+
+/**
+ * The account a manager sidecar runs as, in the workspace's own namespace.
+ *
+ * Not the workspace's account, which is bound to Kubernetes' aggregated `edit`. `edit`
+ * deliberately excludes RBAC, and a helm install of vcluster creates a ServiceAccount, a Role and
+ * a RoleBinding of its own, so a manager running as the workspace account fails part-way through
+ * with a message about roles and leaves half a control plane behind.
+ */
+export const MANAGER_SERVICE_ACCOUNT = 'dev-manager';
+
+/**
+ * The scripts a sidecar declared, as a ConfigMap beside it.
+ *
+ * Rewritten rather than created once, so editing a script in this repo reaches a sidecar that
+ * already exists. The pod picks it up on its next start, which is what Restart is for.
+ */
+async function ensureSidecarScripts(workspace: string, sidecar: DevSidecar): Promise<void> {
+  if (!sidecar.scripts) {
+    return;
+  }
+
+  const namespace = workspaceNamespace(workspace);
+  const name = `${ sidecarName(workspace, sidecar.id) }-scripts`;
+  const data: Record<string, string> = {};
+
+  for (const [file, body] of Object.entries(sidecar.scripts)) {
+    data[file] = body
+      .replace(/{{namespace}}/g, namespace)
+      .replace(/{{workspace}}/g, workspace);
+  }
+
+  const url = `${ BASE }/v1/configmaps/${ namespace }/${ name }`;
+  const existing = await devFetch(url).catch(() => null);
+
+  if (existing) {
+    await devFetch(url, { method: 'PUT', body: JSON.stringify({ ...existing, data }) });
+
+    return;
+  }
+
+  await devFetch(`${ BASE }/v1/configmaps`, {
+    method: 'POST',
+    body:   JSON.stringify({
+      apiVersion: 'v1',
+      kind:       'ConfigMap',
+      metadata:   { namespace, name, labels: { [LABEL_WORKSPACE]: workspace, [LABEL_SIDECAR]: sidecar.id } },
+      data,
+    }),
+  });
+}
+
+/**
+ * The rights a manager sidecar needs, which are the chart's `rancher-manager` Role verbatim.
+ *
+ * Namespaced, and wide within the namespace. That is the trade the chart makes and it is the
+ * right one: what runs here installs a Kubernetes distribution into a namespace, so it needs
+ * everything a helm install of one needs, and the boundary that matters is that it is one
+ * workspace's namespace rather than the cluster.
+ */
+async function ensureManagerRbac(workspace: string, sidecar: DevSidecar): Promise<void> {
+  if (!sidecar.manager) {
+    return;
+  }
+
+  const namespace = workspaceNamespace(workspace);
+
+  await ensure('serviceaccounts', namespace, MANAGER_SERVICE_ACCOUNT, {
+    apiVersion: 'v1',
+    kind:       'ServiceAccount',
+    metadata:   { namespace, name: MANAGER_SERVICE_ACCOUNT },
+  });
+
+  await ensure('rbac.authorization.k8s.io.roles', namespace, MANAGER_SERVICE_ACCOUNT, {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind:       'Role',
+    metadata:   { namespace, name: MANAGER_SERVICE_ACCOUNT },
+    rules:      MANAGER_RULES,
+  });
+
+  await ensure('rbac.authorization.k8s.io.rolebindings', namespace, MANAGER_SERVICE_ACCOUNT, {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind:       'RoleBinding',
+    metadata:   { namespace, name: MANAGER_SERVICE_ACCOUNT },
+    roleRef:    {
+      apiGroup: 'rbac.authorization.k8s.io', kind: 'Role', name: MANAGER_SERVICE_ACCOUNT
+    },
+    subjects: [{ kind: 'ServiceAccount', name: MANAGER_SERVICE_ACCOUNT, namespace }],
+  });
+}
+
+/**
+ * Where a sidecar answers inside the cluster, which is not the same as where a browser reaches it.
+ *
+ * The proxy URL is for a person with a Rancher session; this is for one pod talking to another,
+ * and it is what the workspace's dev server is pointed at.
+ */
+export function sidecarServiceUrl(workspace: string, sidecar: DevSidecar): string {
+  const namespace = workspaceNamespace(workspace);
+
+  return `${ sidecar.scheme || 'http' }://${ sidecarName(workspace, sidecar.id) }.${ namespace }.svc`;
+}
+
+/**
+ * Point the workspace's dashboard at a Rancher, and restart it so it takes.
+ *
+ * The template's `API` is the Rancher this cluster belongs to, which was the only answer while
+ * there was no other. Once the workspace has a Rancher of its own, leaving it talking to the host
+ * is the whole feature not happening: a dashboard pointed at somebody else's cluster is what it
+ * already was.
+ *
+ * Writing the env is what restarts the pod, since a change to the pod template is a rollout, and
+ * the workspace's strategy is Recreate. Nothing is lost by it: the checkout and node_modules are
+ * on a hostPath that outlives the pod. What is lost is a running dev server for as long as it
+ * takes to compile again, which is why this happens on the start and the stop of the sidecar
+ * rather than continuously.
+ */
+export async function setWorkspaceApi(workspace: string, api: string): Promise<void> {
+  const namespace = workspaceNamespace(workspace);
+  const url = `${ BASE }/v1/apps.deployments/${ namespace }/${ namespace }`;
+  const deployment = await devFetch(url).catch(() => null);
+  const container = deployment?.spec?.template?.spec?.containers?.[0];
+
+  if (!container) {
+    return;
+  }
+
+  const env = container.env || [];
+  const existing = env.find((entry: Json) => entry.name === 'API');
+
+  // Unchanged is left alone rather than written back, because writing it back would restart the
+  // workspace for nothing every time a sidecar is restarted.
+  if (existing?.value === api) {
+    return;
+  }
+
+  container.env = existing
+    ? env.map((entry: Json) => (entry.name === 'API' ? { name: 'API', value: api } : entry))
+    : [...env, { name: 'API', value: api }];
+
+  await devFetch(url, { method: 'PUT', body: JSON.stringify(deployment) });
+}
+
+/** What the workspace's dashboard talks to when it has no Rancher of its own. */
+export function templateApi(template: DevTemplate | undefined): string {
+  return template?.env?.API || '';
 }
 
 /**
@@ -1467,6 +1781,18 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
 
   await mirrorSecrets(workspace, template);
 
+  // Both of these are rewritten on every start, not created once. A script edited in this repo
+  // has to reach a sidecar that already exists, and a manager's rights have to be there before
+  // its ReplicaSet is admitted rather than after.
+  await ensureSidecarScripts(workspace, sidecar);
+  await ensureManagerRbac(workspace, sidecar);
+
+  // The changeover this sidecar exists for. Before the scale, so the workspace's next pod already
+  // talks to it; the workspace restarts on the patch and comes back pointed at its own Rancher.
+  if (sidecar.providesApi) {
+    await setWorkspaceApi(workspace, sidecarServiceUrl(workspace, sidecar));
+  }
+
   const existing = await devFetch(url).catch(() => null);
 
   if (existing) {
@@ -1478,6 +1804,9 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
 
   const wanted = sidecar.secrets || [];
   const labels = { app: name, [LABEL_WORKSPACE]: workspace, [LABEL_SIDECAR]: sidecar.id };
+  const substitute = (value: string) => value
+    .replace(/{{namespace}}/g, namespace)
+    .replace(/{{workspace}}/g, workspace);
 
   await devFetch(`${ BASE }/v1/apps.deployments`, {
     method: 'POST',
@@ -1496,7 +1825,8 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
         template: {
           metadata: { labels },
           spec:     {
-            serviceAccountName: WORKSPACE_SERVICE_ACCOUNT,
+            // A manager runs as an account of its own. See ensureManagerRbac.
+            serviceAccountName: sidecar.manager ? MANAGER_SERVICE_ACCOUNT : WORKSPACE_SERVICE_ACCOUNT,
             containers:         [{
               name:  'sidecar',
               image: sidecar.image,
@@ -1504,7 +1834,9 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
               ...(sidecar.args ? { args: sidecar.args } : {}),
               ...(sidecar.port ? { ports: [{ name: 'http', containerPort: sidecar.port }] } : {}),
               env: [
-                ...Object.entries(sidecar.env || {}).map(([envName, value]) => ({ name: envName, value })),
+                ...Object.entries(sidecar.env || {}).map(([envName, value]) => ({
+                  name: envName, value: substitute(value)
+                })),
                 // By reference, never by value: the token is not in the pod spec, so it is not
                 // in `kubectl get deploy -o yaml` either.
                 ...wanted.map((key) => ({
@@ -1517,7 +1849,24 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
                   valueFrom: { secretKeyRef: { name: MIRROR_SECRET, key, optional: true } },
                 })),
               ],
+              // The chart's own budget: half an hour of ten-second-apart attempts, starting a
+              // minute in. What it is waiting for is two helm installs into a cluster this pod has
+              // to create first, and a probe that gave up sooner would kill the thing it is
+              // measuring part-way through.
+              ...(sidecar.readyPort ? {
+                readinessProbe: {
+                  tcpSocket:           { port: sidecar.readyPort },
+                  initialDelaySeconds: 60,
+                  periodSeconds:       20,
+                  failureThreshold:    90,
+                },
+              } : {}),
+              ...(sidecar.preStop ? { lifecycle: { preStop: { exec: { command: sidecar.preStop } } } } : {}),
+              ...(sidecar.scripts ? { volumeMounts: [{ name: 'scripts', mountPath: '/scripts', readOnly: true }] } : {}),
             }],
+            ...(sidecar.scripts ? {
+              volumes: [{ name: 'scripts', configMap: { name: `${ name }-scripts`, defaultMode: 0o555 } }],
+            } : {}),
           },
         },
       },
@@ -1535,11 +1884,52 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
           apiVersion: 'v1',
           kind:       'Service',
           metadata:   { namespace, name, labels },
-          spec:       { selector: { app: name }, ports: [{ name: 'http', port: sidecar.port, targetPort: 'http' }] },
+          spec:       { selector: { app: name }, ports: [{ name: sidecar.scheme || 'http', port: sidecar.port, targetPort: 'http' }] },
         }),
       });
     }
   }
+}
+
+/**
+ * Restart a sidecar: roll its pod, without ever stopping it.
+ *
+ * Not stop-then-start, which is what this was. That is two writes with a gap between them, and
+ * everything that can go wrong in the gap does: if the second half fails the sidecar is left
+ * stopped with the reason showing only as a banner that the next poll replaces, and for a sidecar
+ * that owns the workspace's API the two halves point the workspace at the host Rancher and back
+ * again, restarting it twice for a change that ends where it began. Observed: a Restart that
+ * reported Running and left the Deployment at zero replicas, because the badge was still reading
+ * the terminating pod.
+ *
+ * An annotation on the pod template is how Kubernetes' own `rollout restart` does it: one write,
+ * the Deployment's own strategy carries it out, and a sidecar that was running is running
+ * throughout. It also picks up whatever the scripts ConfigMap now says, which is the usual reason
+ * to press it.
+ */
+export async function restartSidecar(workspace: string, sidecar: DevSidecar, template: DevTemplate): Promise<void> {
+  const namespace = workspaceNamespace(workspace);
+  const url = `${ BASE }/v1/apps.deployments/${ namespace }/${ sidecarName(workspace, sidecar.id) }`;
+  const deployment = await devFetch(url).catch(() => null);
+
+  if (!deployment) {
+    // Never started, so there is nothing to roll and starting it is what was meant.
+    await startSidecar(workspace, sidecar, template);
+
+    return;
+  }
+
+  // The scripts and the secrets are rewritten first, since picking up a change to them is what a
+  // restart is usually for.
+  await ensureSidecarScripts(workspace, sidecar);
+  await mirrorSecrets(workspace, template);
+
+  const meta = deployment.spec.template.metadata;
+
+  meta.annotations = { ...(meta.annotations || {}), 'dev.rancher.io/restarted-at': new Date().toISOString() };
+  deployment.spec.replicas = 1;
+
+  await devFetch(url, { method: 'PUT', body: JSON.stringify(deployment) });
 }
 
 /**
@@ -1550,7 +1940,7 @@ export async function startSidecar(workspace: string, sidecar: DevSidecar, templ
  * nowhere rather than somewhere wrong. The mirrored Secret is left for a different reason, which
  * is that it is the workspace's rather than this sidecar's; both go when the namespace does.
  */
-export async function stopSidecar(workspace: string, id: string): Promise<void> {
+export async function stopSidecar(workspace: string, id: string, template?: DevTemplate): Promise<void> {
   const namespace = workspaceNamespace(workspace);
   const url = `${ BASE }/v1/apps.deployments/${ namespace }/${ sidecarName(workspace, id) }`;
   const deployment = await devFetch(url).catch(() => null);
@@ -1561,13 +1951,23 @@ export async function stopSidecar(workspace: string, id: string): Promise<void> 
 
   deployment.spec.replicas = 0;
   await devFetch(url, { method: 'PUT', body: JSON.stringify(deployment) });
+
+  // The other half of the changeover. A workspace left pointing at a Rancher that has been stopped
+  // is a dashboard that cannot load, and the honest fallback is where it pointed before: the
+  // Rancher this cluster belongs to.
+  const sidecar = (template?.sidecars || []).find((entry) => entry.id === id);
+
+  if (sidecar?.providesApi && templateApi(template)) {
+    await setWorkspaceApi(workspace, templateApi(template));
+  }
 }
 
 /** Where a sidecar's own UI is served, on Rancher's origin, the same door a workspace uses. */
 export function sidecarProxyUrl(workspace: string, sidecar: DevSidecar): string {
   const namespace = workspaceNamespace(workspace);
+  const scheme = sidecar.scheme || 'http';
 
-  return `${ BASE }/api/v1/namespaces/${ namespace }/services/http:${ sidecarName(workspace, sidecar.id) }:${ sidecar.port }/proxy/`;
+  return `${ BASE }/api/v1/namespaces/${ namespace }/services/${ scheme }:${ sidecarName(workspace, sidecar.id) }:${ sidecar.port }/proxy/`;
 }
 
 /** One entry in a workspace's Service. */

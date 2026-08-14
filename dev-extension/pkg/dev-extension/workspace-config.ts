@@ -17,22 +17,34 @@
  * which it wraps rather than replaces: a workspace is still an ordinary clone of
  * rancher/dashboard that someone can work in, and its config is still the repo's.
  *
- * The annotated original, with the reasoning for each option, is
- * `rancher-extension/dev-extension/pod/vue.config.js`. Keep the two in step.
+ * The annotated original is `rancher-extension/dev-extension/pod/vue.config.js`, and the two have
+ * deliberately diverged: that one serves the dev server this extension itself runs in, which is
+ * only ever reached through the proxy, so it still requires a prefix. This one serves a workspace,
+ * which can be reached either way. See the note on the prefix below.
  */
 export const WORKSPACE_VUE_CONFIG = `// Written by the Dev extension. See pkg/dev-extension/workspace-config.ts.
 //
-// This dev server is reached at DEV_PROXY_PATH, through the apiserver's service proxy, on
-// Rancher's own origin. Everything below is that fact and its consequences.
+// This dev server is reached one of two ways, and everything below is the consequence of which.
+//
+//   - behind the apiserver's service proxy, at DEV_PROXY_PATH, on Rancher's own origin. The Host
+//     header is the proxy's, the TLS the browser sees is Rancher's, the prefix is stripped on the
+//     way in and has to be put back on every URL handed out.
+//   - at an origin of its own, on a node port, with no prefix at all.
+//
+// A dev server built for one does not work at the other: the router base is baked in. Which one
+// this is comes from DEV_PROXY_PATH being set or empty, and changing it restarts the pod.
+//
+// The second mode exists because of what the first one does to a dashboard. rancher/dashboard
+// builds its API URLs absolute from the page origin, so behind the prefix its /v1 and /v3 calls
+// never reach this dev server at all: they go to the Rancher this page was served from, using
+// that session, against that cluster. Measured, on a workspace with a Rancher of its own: two
+// requests arrived here and a hundred and thirty-six went to the host. An origin of its own is
+// the only thing that fixes it, because there is no browser-side API base to set.
 const proxyPath = (process.env.DEV_PROXY_PATH || '').replace(/\\/$/, '');
-
-if (!proxyPath) {
-  throw new Error('DEV_PROXY_PATH must be set - it is the service-proxy path this dev server is reached at');
-}
 
 // The prefix on every in-app link, which has to be the path the page was loaded at. Set before
 // the shell's config runs, because the shell reads it out of the environment as it does.
-process.env.ROUTER_BASE = proxyPath + '/';
+process.env.ROUTER_BASE = proxyPath ? proxyPath + '/' : '/';
 
 // The repo's own config, kept beside this one on boot, rather than a reimplementation of it.
 // rancher/dashboard is a monorepo whose shell is ./shell rather than a node_modules package,
@@ -87,17 +99,24 @@ base.devServer = {
     htmlAcceptHeaders: ['text/html', 'application/xhtml+xml']
   },
 
-  // Hot reload rides the same proxy. The sentinels are webpack-dev-server's own "infer it from
-  // window.location" values; only the path is ours.
   hot:             true,
   webSocketServer: { type: 'ws', options: { path: '/ws' } },
   client:          {
-    webSocketURL: {
-      protocol: 'auto',
-      hostname: '0.0.0.0',
-      port:     0,
-      pathname: proxyPath + '/ws'
-    },
+    // Hot reload rides the same proxy, and only when there is one. The sentinels are
+    // webpack-dev-server's own "infer it from window.location" values and only the path is ours,
+    // but 'auto' is a sentinel the *server* substitutes as it serves the client: reached
+    // directly, nothing substitutes it, the client hands 'auto' to the WebSocket constructor and
+    // the browser throws before the app mounts. Symptom: a page that stays on its loading spinner
+    // for ever and makes no API calls at all. Served at its own origin the defaults are already
+    // right, so the override is simply absent.
+    ...(proxyPath ? {
+      webSocketURL: {
+        protocol: 'auto',
+        hostname: '0.0.0.0',
+        port:     0,
+        pathname: proxyPath + '/ws'
+      }
+    } : {}),
     // The compile-error overlay would cover the whole framed dashboard for whoever is looking
     // when an edit fails to compile.
     overlay: false

@@ -19,6 +19,10 @@
  * `https://rancher.cattle-system.svc` answers from any pod in this cluster, so the dev server
  * points at that.
  */
+import {
+  VCLUSTER_VALUES, MANAGE_SCRIPT, PAUSE_SCRIPT, VCLUSTER_VERSION, SIDECAR_HOST_PATH
+} from './rancher-sidecar';
+
 /**
  * One secret the product needs, declared rather than hardcoded into a form.
  *
@@ -64,7 +68,52 @@ export interface DevSidecar {
   args?: string[];
   /** What its Service points at, when it serves a UI or an API. Omitted when it serves nothing. */
   port?: number;
+  /** How to speak to that port, since the apiserver's service proxy takes the scheme in the path. */
+  scheme?: 'http' | 'https';
+  /**
+   * Whether its own UI survives being served under the proxy's path prefix.
+   *
+   * Rancher's does not, and neither does Keycloak's: both build absolute URLs from their own idea
+   * of where they are. The closet chart says the same thing by giving exactly those two a NodePort
+   * instead. A Launch button that opens a page which immediately redirects itself out of the
+   * prefix and 404s is worse than no button, so a card without this says where the thing is
+   * instead of offering to open it.
+   */
+  launchable?: boolean;
+  /**
+   * Environment. `{{namespace}}`, `{{workspace}}` and `{{proxyPath}}` are substituted when the
+   * Deployment is written, since all three contain the workspace's own name.
+   */
   env?: Record<string, string>;
+  /**
+   * Files mounted read-only at `/scripts`, as a ConfigMap of this sidecar's own.
+   *
+   * A sidecar whose job is to install things is a script rather than an image, and the closet
+   * chart carries exactly these as a ConfigMap for the same reason: a script long enough to have
+   * an ordering in it does not belong on a command line.
+   */
+  scripts?: Record<string, string>;
+  /**
+   * This sidecar drives Kubernetes in the workspace's namespace, so it gets a ServiceAccount of
+   * its own with rights the ordinary workspace account does not have. See MANAGER_RULES.
+   */
+  manager?: boolean;
+  /**
+   * Considered ready only once this TCP port answers, with the chart's own budget of half an hour.
+   *
+   * Without it the card says Running the moment the container starts, which for something that
+   * installs two helm charts inside a cluster it has to create first is a lie for about ten
+   * minutes.
+   */
+  readyPort?: number;
+  /** Run before the container is stopped. What a stop has to undo beyond scaling this pod. */
+  preStop?: string[];
+  /**
+   * While this sidecar runs, the workspace's dashboard talks to it rather than to the Rancher this
+   * cluster belongs to. Starting it repoints the workspace and restarts it; stopping it puts the
+   * workspace back. See setWorkspaceApi.
+   */
+  providesApi?: boolean;
   /**
    * Keys from this template's own secret declarations that this sidecar needs, arriving as
    * environment by reference under the key's own name. A sidecar whose key is not set says so on
@@ -120,6 +169,24 @@ export interface DevTemplate {
    * that the template which does install it changes one word rather than a component.
    */
   conversations: 'claude' | 'shell';
+  /**
+   * This template's app has to be served at an origin of its own rather than behind the
+   * apiserver's path-prefixed service proxy.
+   *
+   * rancher/dashboard builds its API URLs absolute from the page origin, so under the prefix its
+   * `/v1` and `/v3` calls never reach its own dev server: they go to the Rancher this product is
+   * served from, carrying that session, against that cluster. Counted on a running workspace: two
+   * requests reached the workspace and a hundred and thirty-six reached the host. The workspace's
+   * own API setting cannot win that argument, because the browser never asks it.
+   *
+   * So a template that says this gets a NodePort and a dev server built with no prefix, and its
+   * Browser tab becomes a link out rather than a frame. That is also what the harness does: its
+   * Browser tab carries an external-link mark and opens elsewhere.
+   *
+   * The cost is stated where it is offered: a node port is open to whoever can reach the node,
+   * with no Rancher session in front of it.
+   */
+  ownOrigin?: boolean;
   /** What this template's workspaces and sidecars need from the secret store. */
   secrets?: DevSecret[];
   /** The optional containers a workspace of this template can run beside itself. */
@@ -156,6 +223,9 @@ export const TEMPLATES: DevTemplate[] = [
     // through, so https here is a proxy error rather than more security.
     scheme:        'http',
     conversations: 'shell',
+    // See the field. What this workspace runs is rancher/dashboard, which is exactly the app that
+    // cannot be served behind a path prefix without its API calls going to the wrong Rancher.
+    ownOrigin:     true,
     // The checkout and node_modules, kept across restarts. Without it every restart is another
     // clone and another install, which is the difference between a workspace and a demo.
     hostPath:      '/var/lib/rancher/dev-workspaces',
@@ -188,6 +258,13 @@ export const TEMPLATES: DevTemplate[] = [
         generated: true,
       },
       {
+        key:       'RANCHER_BOOTSTRAP_PASSWORD',
+        label:     'Rancher admin password',
+        help:      'The password for admin in this workspace\'s own Rancher. Generated the first time the Rancher sidecar is started and kept, because it is what you log in with afterwards.',
+        required:  true,
+        generated: true,
+      },
+      {
         key:       'OPENLDAP_ADMIN_PASSWORD',
         label:     'OpenLDAP admin password',
         help:      'The password for cn=admin. Generated the first time OpenLDAP is started and kept, since the directory it protects is on a volume that outlives the pod.',
@@ -199,6 +276,41 @@ export const TEMPLATES: DevTemplate[] = [
     // card. What is deliberately absent is a Rancher server: it cannot reach Running here (see
     // the note above), so it must not appear as something a person can press Start on.
     sidecars: [
+      {
+        id:          'rancher',
+        group:       'Dev',
+        label:       'Rancher',
+        description: 'A Rancher of this workspace\'s own: a vcluster with cert-manager and rancher-latest installed inside it, relayed onto this namespace. While it runs, the workspace\'s dashboard talks to it instead of to the Rancher this cluster belongs to. The first start is about ten minutes.',
+        // The chart's manager image: helm and kubectl on alpine, which is all the script needs.
+        image:       'dtzar/helm-kubectl:latest',
+        command:     ['/bin/sh', '/scripts/manage.sh'],
+        port:        443,
+        scheme:      'https',
+        // Rancher's UI rewrites itself out of a path prefix, so the proxy cannot serve it. What
+        // this is for is the workspace's own dashboard, which reaches it by service name.
+        launchable:  false,
+        manager:     true,
+        readyPort:   443,
+        providesApi: true,
+        scripts:     {
+          'vcluster-values.yaml': VCLUSTER_VALUES.replace('{{dataPath}}', `${ SIDECAR_HOST_PATH }/{{namespace}}/vcluster-data`),
+          'manage.sh':            MANAGE_SCRIPT,
+          'pause.sh':             PAUSE_SCRIPT,
+        },
+        preStop: ['/bin/sh', '/scripts/pause.sh'],
+        env:     {
+          NS:               '{{namespace}}',
+          VCLUSTER_VERSION,
+          // The name the certificate is issued for. It is not how anything reaches this Rancher
+          // (the workspace uses the service name and the relay), and the chart's is likewise a
+          // name that resolves nowhere; what it has to be is stable, so the certificate does not
+          // change under a session.
+          RANCHER_HOSTNAME: 'rancher.{{workspace}}.local',
+        },
+        secrets: ['RANCHER_BOOTSTRAP_PASSWORD'],
+        // The chart's own name for it, which is also what the rancher chart's value is called.
+        secretEnv: { CATTLE_BOOTSTRAP_PASSWORD: 'RANCHER_BOOTSTRAP_PASSWORD' },
+      },
       {
         id:          'keycloak',
         group:       'Auth',

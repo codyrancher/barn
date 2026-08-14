@@ -17,7 +17,8 @@ import { RcButton } from '@components/RcButton';
 import AsyncButton from '@shell/components/AsyncButton';
 import { colorForState, stateDisplay } from '@shell/plugins/dashboard-store/resource-class';
 import {
-  listSidecars, startSidecar, stopSidecar, sidecarProxyUrl, templateSecretKey
+  listSidecars, startSidecar, stopSidecar, restartSidecar, sidecarProxyUrl, sidecarServiceUrl,
+  templateSecretKey
 } from '../api';
 import { templateById } from '../templates';
 
@@ -137,6 +138,16 @@ export default {
       return this.states[sidecar.id]?.detail || '';
     },
 
+    /** The last line it printed, while it is still coming up. */
+    log(sidecar) {
+      return this.states[sidecar.id]?.log || '';
+    },
+
+    /** Where one pod reaches another, which is what a sidecar that serves no UI is for. */
+    address(sidecar) {
+      return sidecar.port ? sidecarServiceUrl(this.workspace.name, sidecar) : '';
+    },
+
     url(sidecar) {
       return sidecar.port ? sidecarProxyUrl(this.workspace.name, sidecar) : '';
     },
@@ -158,7 +169,7 @@ export default {
       this.error = '';
 
       try {
-        await stopSidecar(this.workspace.name, sidecar.id);
+        await stopSidecar(this.workspace.name, sidecar.id, this.template);
         await this.refresh();
         done(true);
       } catch (e) {
@@ -167,13 +178,12 @@ export default {
       }
     },
 
-    /** Stop then start, which for a sidecar is what restart means. */
+    /** A rollout, not a stop and a start. See restartSidecar for why that distinction matters. */
     async restart(sidecar, done) {
       this.error = '';
 
       try {
-        await stopSidecar(this.workspace.name, sidecar.id);
-        await startSidecar(this.workspace.name, sidecar, this.template);
+        await restartSidecar(this.workspace.name, sidecar, this.template);
         await this.refresh();
         done(true);
       } catch (e) {
@@ -271,9 +281,39 @@ export default {
               {{ detail(sidecar) }}
             </p>
 
+            <!--
+              While it is coming up, the last thing it said. A sidecar that installs two helm
+              charts is Starting for about ten minutes, and this is the difference between that
+              and something being wrong.
+            -->
+            <p
+              v-if="log(sidecar)"
+              class="workspace-sidecars__log"
+            >
+              {{ log(sidecar) }}
+            </p>
+
+            <!--
+              What the workspace itself talks to, for a sidecar whose whole point is being reached
+              from inside the cluster rather than opened in a tab.
+            -->
+            <p
+              v-if="address(sidecar) && sidecar.providesApi"
+              class="workspace-sidecars__image"
+            >
+              {{ address(sidecar) }}
+              <span v-if="stateOf(sidecar) === 'running'">is what this workspace's dashboard is pointed at.</span>
+              <span v-else>is what this workspace's dashboard will be pointed at while this runs.</span>
+            </p>
+
             <div class="workspace-sidecars__links">
+              <!--
+                Only where the service proxy can actually serve the thing. Rancher and Keycloak
+                both rewrite themselves out of a path prefix, and a Launch that opens a page which
+                redirects itself to a 404 is worse than no Launch.
+              -->
               <RcButton
-                v-if="sidecar.port && stateOf(sidecar) === 'running'"
+                v-if="sidecar.port && sidecar.launchable !== false && stateOf(sidecar) === 'running'"
                 variant="link"
                 size="small"
                 left-icon="external-link"
@@ -284,7 +324,7 @@ export default {
                 Launch
               </RcButton>
               <RcButton
-                v-if="sidecar.port && stateOf(sidecar) === 'running'"
+                v-if="sidecar.port && sidecar.launchable !== false && stateOf(sidecar) === 'running'"
                 variant="link"
                 size="small"
                 left-icon="copy"
@@ -397,6 +437,17 @@ export default {
     &__detail {
       color:     var(--muted);
       font-size: 12px;
+    }
+
+    // One line, whatever it says: a helm install prints lines of any length and the card is a
+    // card. What matters is that it is moving and what it is doing, not the whole line.
+    &__log {
+      overflow:      hidden;
+      color:         var(--muted);
+      font-family:   monospace;
+      font-size:     11px;
+      text-overflow: ellipsis;
+      white-space:   nowrap;
     }
 
     &__links {
