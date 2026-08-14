@@ -1,0 +1,109 @@
+/**
+ * The global terminals, as tabs in Rancher's window manager.
+ *
+ * The harness puts its terminals in a resizable drawer across the bottom of the page, with a
+ * tab per terminal, a close on each and a plus at the end. Rancher already has that drawer:
+ * the window manager is where container shells and logs open, it is resizable, it keeps its
+ * tabs across navigation, and it takes tabs from extensions. So none of it is rebuilt here.
+ * This file is only the bookkeeping: which numbers are taken, and what a tab is made of.
+ *
+ * One tab is one tmux session in the dev server's pod, with a working directory of its own, so
+ * two tabs are two conversations rather than two views of one (see pod/shell.sh). Closing a tab
+ * closes this end of the socket and leaves the session running, which is what makes reopening
+ * the same number a reattach rather than a fresh start.
+ */
+import {
+  DEV_POD_NAMESPACE, DEV_POD_LABELS, DEV_POD_CONTAINER, TERMINAL_SESSION_PREFIX
+} from './config/constants';
+
+/** Tab ids, so the tabs belonging to this product can be told from anyone else's. */
+const TAB_PREFIX = 'dev-terminal-';
+
+/**
+ * The window manager's layouts, as strings.
+ *
+ * `Layout` in @shell/types/window-manager is a `const enum`, which this build erases rather
+ * than emits, so importing it would compile and then be undefined at runtime. The values are
+ * these three strings.
+ *
+ * All three, because the drawer should be usable from anywhere in the product. The window
+ * manager hides the whole panel if any tab in it lacks the current layout, so a tab that only
+ * claimed `default` would take Rancher's own container shells down with it on the home page.
+ */
+const LAYOUTS = ['default', 'home', 'plain'];
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Store = any;
+
+interface TerminalTab {
+  id: string;
+  label: string;
+}
+
+/** The tmux session, and so the conversation, that a numbered terminal attaches to. */
+export function terminalSession(n: number): string {
+  return `${ TERMINAL_SESSION_PREFIX }-${ n }`;
+}
+
+/** The numbers currently open in the drawer, in order. */
+export function openTerminals(store: Store): number[] {
+  return (store.getters['wm/tabs'] || [])
+    .filter((tab: TerminalTab) => tab.id?.startsWith(TAB_PREFIX))
+    .map((tab: TerminalTab) => Number(tab.id.slice(TAB_PREFIX.length)))
+    .filter((n: number) => Number.isInteger(n))
+    .sort((a: number, b: number) => a - b);
+}
+
+/**
+ * The number a new terminal should take: the smallest that is not open.
+ *
+ * Smallest rather than one past the largest, so closing Terminal 2 and adding one gives
+ * Terminal 2 back, which is also the session it left running. Numbering upwards forever would
+ * make every new terminal a new conversation and quietly strand the old ones.
+ */
+export function nextTerminalNumber(store: Store): number {
+  const open = openTerminals(store);
+  let n = 1;
+
+  while (open.includes(n)) {
+    n += 1;
+  }
+
+  return n;
+}
+
+/**
+ * Open a terminal in the drawer, or bring it to the front if it is already there.
+ *
+ * `wm/open` does both: its addTab keeps an existing tab as it is and makes it the active one,
+ * so this is also how a link to a terminal focuses it.
+ */
+export function openTerminal(store: Store, n?: number): number {
+  const number = n || nextTerminalNumber(store);
+  const session = terminalSession(number);
+
+  store.dispatch('wm/open', {
+    id:    `${ TAB_PREFIX }${ number }`,
+    label: `Terminal ${ number }`,
+    icon:  'terminal',
+    // Looked up through the extension registry rather than the shell's own window components,
+    // which is what any truthy extensionId selects. See index.ts, where the name is registered.
+    component:   'DevTerminalTab',
+    extensionId: 'dev-extension',
+    position:    'bottom',
+    layouts:     LAYOUTS,
+    // True, despite what the window manager's own docs suggest: the panel only draws its tab
+    // bar when every tab in it wants a header, so a tab asking for no header takes away the
+    // tab strip, the close buttons and the drag handle for everything else in the drawer too.
+    showHeader:  true,
+    attrs:       {
+      session,
+      number,
+      namespace: DEV_POD_NAMESPACE,
+      labels:    DEV_POD_LABELS,
+      container: DEV_POD_CONTAINER,
+    },
+  }, { root: true });
+
+  return number;
+}

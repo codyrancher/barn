@@ -157,6 +157,14 @@ export default {
     async connectWhenPodIsUp() {
       ensureDevExtension();
 
+      // Whatever went wrong last time is over: this is a fresh wait, and the
+      // error belongs to the connection that ended. Left in place, the exec
+      // subresource's parting shot when a pod is killed ("exit code 137") would
+      // sit there as the status forever, because the overlay shows the error in
+      // preference to the state and nothing else clears it until a socket
+      // opens, which cannot happen while there is no pod.
+      this.error = '';
+
       while (!this.unmounted) {
         const pod = await devExtensionPod();
 
@@ -334,10 +342,24 @@ export default {
   &__xterm {
     flex: 1 1 auto;
     min-height: 0;
+    // A stacking context of its own, so xterm's canvas layers are ordered
+    // inside it rather than against their neighbours. They carry z-index up to
+    // 3, and nothing between them and this pane used to establish a context, so
+    // they beat the status overlay below on the only comparison that decides a
+    // click. Containing them here means the two siblings are ordered by their
+    // own z-index and xterm's internal count stops being this component's
+    // business.
+    position: relative;
+    z-index: 0;
   }
 
   &__status {
     position: absolute;
+    // Above xterm's canvas layers, which are positioned too. Without this the
+    // overlay draws on top but the canvas still wins the hit test, so the
+    // Reconnect button below cannot be clicked and a disconnected pane is dead
+    // until the page is reloaded.
+    z-index: 1;
     right: 10px;
     bottom: 8px;
     display: flex;

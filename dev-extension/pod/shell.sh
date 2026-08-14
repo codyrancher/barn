@@ -1,6 +1,7 @@
 #!/bin/sh
 # Entrypoint for a terminal tab. The extension's terminal component runs this
-# over the Kubernetes exec subresource, with the tab's session id as $1.
+# over the Kubernetes exec subresource, with the tab's session id as $1 and,
+# optionally, the directory the pane should start in as $2.
 #
 # Everything the tab runs comes out of /seed rather than the tree, so a tab
 # always starts the scripts the extension last wrote, without a pod restart.
@@ -13,17 +14,47 @@ set -e
 
 SESSION=${1:-main}
 
-# Where the pane starts, and what claude is therefore pointed at: DevExtension's
-# own source, the tree this pod's dev server is compiling and serving.
-WORKDIR=/app/pkg/dev-extension
+# Where the pane starts, and what claude is therefore pointed at. The default is
+# DevExtension's own source, the tree this pod's dev server is compiling and
+# serving, which is what the editor's pane wants.
+#
+# It is an argument because claude keys its conversation history by working
+# directory, so one directory means one conversation, and two panes sharing a
+# directory means the second one resumes the first one's conversation rather than
+# having its own. The harness gives each terminal tab a directory for exactly
+# this reason. Callers that want several independent sessions (the Dev product's
+# global terminals) pass one per session; callers that want the source tree pass
+# nothing.
+WORKDIR=${2:-/app/pkg/dev-extension}
 
-# claude keys its conversation history by working directory, so one directory
-# means one conversation. The harness gives each terminal tab a directory of its
-# own for that reason; here there is one pane, pointed at the thing you came to
-# edit, so there is nothing to keep apart.
 HOME_DIR=/app/.home
 
 /bin/sh /seed/terminal-tools.sh
+
+# A session directory has to exist before tmux is told to start in it, and it has
+# to belong to the node user, since everything in the pane is that user and
+# claude writes here. Only for a directory this creates: the default is the
+# source tree, which boot.sh already handed over.
+if [ ! -d "$WORKDIR" ]; then
+  mkdir -p "$WORKDIR"
+
+  if [ "$(id -u)" = 0 ]; then
+    chown node:node "$WORKDIR"
+  fi
+fi
+
+# What claude reads before it is asked anything. A session in a directory of its
+# own would otherwise start knowing nothing about the cluster it is in and
+# re-derive it, badly, every time. Copied rather than linked so a session can
+# edit its own, and only when there is none, so an edited one is never
+# overwritten. The source tree has its own CLAUDE.md, so this is a no-op there.
+if [ ! -f "$WORKDIR/CLAUDE.md" ] && [ -f /seed/session-claude.md ]; then
+  cp /seed/session-claude.md "$WORKDIR/CLAUDE.md"
+
+  if [ "$(id -u)" = 0 ]; then
+    chown node:node "$WORKDIR/CLAUDE.md"
+  fi
+fi
 
 set -- tmux -f /seed/tmux.conf new-session -A -s "mc-$SESSION" -c "$WORKDIR" \
   "/bin/bash /seed/claude-session.sh"

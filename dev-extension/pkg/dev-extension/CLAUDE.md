@@ -13,6 +13,27 @@ watching it.
 
 - `pkg/dev-extension/` is this extension: `product.ts` (nav entries), `routing/index.ts`,
   `pages/`, `models/` (overrides of the shell's models, which win over the shell's own).
+- It registers two products. `devextension` is the live-reload demo. `dev` is the Claude
+  Harness rebuilt on Kubernetes: a workspace is a namespace with a Deployment and a Service,
+  started and stopped by scaling, with a terminal on the pod's exec subresource. Its
+  Kubernetes calls are in `api.ts`, the container each workspace runs is in `templates.ts`,
+  and the terminal is `components/DevTerminal.vue`, which will point at any pod given a
+  namespace, labels, a container and an argv.
+- The `dev` product's nav is Workspaces, Terminal, My Work, Templates, Settings. A workspace
+  opens as tabs (Overview, Conversations, Browser, Ports) at
+  `/dev/c/_/workspaces/<name>#<tab>`; the tab is the hash rather than a path segment, and
+  `pages/WorkspaceDetail.vue` says at the top why that is not cosmetic. Terminal is the same
+  DevTerminal pointed at this pod, running `/seed/shell.sh <session> /app/.sessions/<session>`,
+  so it is a tmux session that survives the browser and a conversation of its own. My Work and
+  Settings are deliberately empty pages describing what they are waiting on, which is a GitHub
+  token in a Secret and shared claude credentials.
+- Editing anything in `pod/` needs three steps, and the third is the one that gets forgotten:
+  edit it in the repo, regenerate the seed, then `scripts/apply-dev-extension-seed.mjs` to put
+  it in the ConfigMap this pod mounts at `/seed`. Without the third it only reaches a fresh pod;
+  patched by hand instead, the extension writes its own copy back over it on the next load.
+- The harness calls a workspace a project. This does not, because Rancher's own nav already
+  uses that word for a group of namespaces in a cluster. The `dev-` namespace prefix is
+  unchanged by that: it names the product, not the concept.
 - The dashboard is reached through the Kubernetes service proxy, not on its own port. Never
   hardcode a hostname; every URL the build hands out is derived from the proxy path in
   `/app/vue.config.js`.

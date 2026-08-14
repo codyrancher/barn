@@ -1,8 +1,9 @@
 import { importTypes } from '@rancher/auto-import';
-import { IPlugin, ActionLocation } from '@shell/core/types';
+import { IPlugin } from '@shell/core/types';
 import { ensureEditorContent } from './api';
-import { ensureDevExtension, devExtensionUrl } from './dev-extension';
+import { ensureDevExtension } from './dev-extension';
 import { EDITOR_ROUTE } from './editor-product';
+import HeaderButtons from './components/HeaderButtons.vue';
 
 // Init the package
 export default function(plugin: IPlugin): void {
@@ -38,33 +39,14 @@ export default function(plugin: IPlugin): void {
     component: () => import('./pages/editor.vue'),
   });
 
-  // Global button in the top header (visible everywhere). Ensures the content
-  // pod exists, then opens the editor in a new browser tab.
-  plugin.addAction(ActionLocation.HEADER, {}, {
-    label:   'Editor',
-    tooltip: 'Open the Magic Closet editor',
-    icon:    'icon-external-link',
-    invoke(this: any) {
-      // `this` is bound to the Header component when invoked.
-      ensureEditorContent();
-      const href = this.$router.resolve({ name: EDITOR_ROUTE }).href;
-
-      window.open(href, '_blank');
-    },
-  });
-
-  // Same, for DevExtension: opens the dev dashboard the pod serves, at its
-  // service-proxy URL on this same origin. A plain URL rather than a route,
-  // since it is a different dashboard, not a page in this one.
-  plugin.addAction(ActionLocation.HEADER, {}, {
-    label:   'Dev Extension',
-    tooltip: 'Open the DevExtension dev server',
-    icon:    'icon-external-link',
-    invoke() {
-      ensureDevExtension();
-      window.open(devExtensionUrl(), '_blank');
-    },
-  });
+  // The global buttons, in the header on every page: Editor, and the dev
+  // server DevExtension serves. They were two `addAction(ActionLocation.HEADER)`
+  // calls, which the shell renders as an icon apiece with the label only on the
+  // aria-label, so both arrived as the same anonymous icon and neither said
+  // which was which. NavHeaderRight renders a component of ours instead, so the
+  // buttons can carry their names. See components/HeaderButtons.vue for what
+  // that slot costs.
+  plugin.register('component', 'NavHeaderRight', HeaderButtons);
 
   // Override the core /prefs route with a wrapper that renders the original
   // page plus an "Enable Magic Closet" checkbox (see pages/prefs.vue). The core
