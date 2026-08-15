@@ -18,7 +18,6 @@
 import { RcIcon } from '@components/RcIcon';
 import PodTerminal from '../components/PodTerminal.vue';
 import ExtensionSelect from '../components/ExtensionSelect.vue';
-import ClaudeMark from '../components/ClaudeMark.vue';
 import AsyncButton from '@shell/components/AsyncButton';
 import { RcButton } from '@components/RcButton';
 import PublishStatus from '../components/PublishStatus.vue';
@@ -68,7 +67,7 @@ export default {
   name: 'BarnEditor',
 
   components: {
-    RcIcon, RcButton, PodTerminal, ExtensionSelect, ExtensionFilesModal, ClaudeMark, AsyncButton,
+    RcIcon, RcButton, PodTerminal, ExtensionSelect, ExtensionFilesModal, AsyncButton,
     PublishStatus
   },
 
@@ -283,10 +282,6 @@ export default {
           data-testid="barn-agent-files-button"
           @click="showFiles = true"
         >
-          <ClaudeMark
-            class="mc-editor__mark"
-            :size="14"
-          />
           Files
         </RcButton>
       </div>
@@ -456,12 +451,6 @@ $divider-width: 8px;
   // empty, so this is the whole of it.
   &__bar-select {
     margin-left: auto;
-  }
-
-  // The mark sits inside the button now, in front of the word, so the pane still says whose it
-  // is while the button looks like the one across the divider.
-  &__mark {
-    margin-right: 6px;
   }
 
   &__panes {
