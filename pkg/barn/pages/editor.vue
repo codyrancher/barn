@@ -20,6 +20,7 @@ import PodTerminal from '../components/PodTerminal.vue';
 import ExtensionSelect from '../components/ExtensionSelect.vue';
 import ClaudeMark from '../components/ClaudeMark.vue';
 import AsyncButton from '@shell/components/AsyncButton';
+import { RcButton } from '@components/RcButton';
 import PublishStatus from '../components/PublishStatus.vue';
 import ExtensionFilesModal from '../components/ExtensionFilesModal.vue';
 import {
@@ -67,7 +68,8 @@ export default {
   name: 'BarnEditor',
 
   components: {
-    RcIcon, PodTerminal, ExtensionSelect, ExtensionFilesModal, ClaudeMark, AsyncButton, PublishStatus
+    RcIcon, RcButton, PodTerminal, ExtensionSelect, ExtensionFilesModal, ClaudeMark, AsyncButton,
+    PublishStatus
   },
 
   data() {
@@ -275,29 +277,21 @@ export default {
         class="mc-editor__bar"
         :style="{ width: `calc(${ split }% - 4px)` }"
       >
-        <button
-          type="button"
-          class="mc-editor__icon-button"
+        <RcButton
+          variant="secondary"
+          size="small"
           data-testid="barn-agent-files-button"
-          title="Files"
-          aria-label="Files"
           @click="showFiles = true"
         >
-          <ClaudeMark :size="16" />
-        </button>
+          <ClaudeMark
+            class="mc-editor__mark"
+            :size="14"
+          />
+          Files
+        </RcButton>
       </div>
       <div class="mc-editor__bar-gap" />
       <div class="mc-editor__bar mc-editor__bar--right">
-        <AsyncButton
-          class="mc-editor__publish"
-          mode="edit"
-          action-label="Publish"
-          waiting-label="Building"
-          success-label="Published"
-          error-label="Build failed"
-          size="sm"
-          @click="publish"
-        />
         <PublishStatus
           :stage="publishStage"
           :total="publishTotal"
@@ -311,6 +305,16 @@ export default {
           :value="extension"
           @open="openExtension"
           @create="createExtension"
+        />
+        <AsyncButton
+          class="mc-editor__publish"
+          mode="edit"
+          action-label="Publish"
+          waiting-label="Building"
+          success-label="Published"
+          error-label="Build failed"
+          size="sm"
+          @click="publish"
         />
       </div>
     </div>
@@ -454,29 +458,10 @@ $divider-width: 8px;
     margin-left: auto;
   }
 
-  // A square with a rounded border, sized so it is the same height as the select across the
-  // gap rather than the height of the glyph inside it.
-  &__icon-button {
-    display:         inline-flex;
-    align-items:     center;
-    justify-content: center;
-    width:           24px;
-    height:          24px;
-    padding:         0;
-    border:          1px solid var(--border, #dcdee7);
-    border-radius:   var(--border-radius);
-    background:      none;
-    cursor:          pointer;
-    line-height:     0;
-
-    &:hover {
-      background:   var(--accent-btn);
-      border-color: var(--primary);
-    }
-
-    &:focus-visible {
-      outline: 2px solid var(--primary);
-    }
+  // The mark sits inside the button now, in front of the word, so the pane still says whose it
+  // is while the button looks like the one across the divider.
+  &__mark {
+    margin-right: 6px;
   }
 
   &__panes {
