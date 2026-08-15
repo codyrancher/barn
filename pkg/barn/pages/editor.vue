@@ -447,6 +447,21 @@ $divider-width: 8px;
     flex: 0 0 auto;
   }
 
+  // Both buttons the height of the box they sit beside. The shell's small button is 24px and
+  // its default is 30, and neither of those is 32, so this is said once here rather than
+  // fought for through size props that do not have that number in them.
+  &__bar button {
+    height:     32px;
+    min-height: 32px;
+  }
+
+  // And the box's own dead space. LabeledSelect keeps a container above the input for a label
+  // even when there is no label, which made the select 9px taller than the thing you can
+  // click on it and the bar taller than any of its contents.
+  &__bar-select :deep(.labeled-container) {
+    display: none;
+  }
+
   // Hard against the right edge, where the link to a new tab used to be. The bar is otherwise
   // empty, so this is the whole of it.
   &__bar-select {
