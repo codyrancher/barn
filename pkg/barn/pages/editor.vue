@@ -543,6 +543,8 @@ export default {
 $divider-width: 8px;
 // Every control on the action bar is this tall.
 $control-height: 30px;
+// The recessed strip over the framed pane, and everything in it.
+$address-height: 28px;
 
 .mc-editor {
   display: flex;
@@ -700,33 +702,52 @@ $control-height: 30px;
     flex:          0 0 auto;
     display:       flex;
     align-items:   stretch;
-    height:        26px;
+    height:        $address-height;
     background:    var(--body-bg, #fff);
     border-bottom: 1px solid var(--border, #dcdee7);
-    box-shadow:    inset 0 1px 2px rgba(0, 0, 0, 0.08);
+    box-shadow:    inset 0 1px 2px rgba(0, 0, 0, 0.06);
   }
 
   &__nav {
     flex:            0 0 auto;
-    width:           26px;
+    width:           28px;
     display:         inline-flex;
     align-items:     center;
     justify-content: center;
     padding:         0;
     border:          none;
     background:      none;
-    color:           var(--link);
+    // Chrome rather than a link: these are the same kind of thing as the border they sit on,
+    // and in link blue they were the loudest thing on a strip whose job is to be quiet.
+    color:           var(--muted);
     cursor:          pointer;
     line-height:     0;
+    // Both, because the shell gives every button a minimum height for touch targets. Without
+    // it these were 40px tall inside a 28px strip and hung out of both edges of it.
+    height:          100%;
+    min-height:      0;
+
+    i {
+      font-size: 16px;
+    }
 
     &:hover:not(:disabled) {
       background: var(--accent-btn);
+      color:      var(--body-text);
     }
 
     &:disabled {
-      color:  var(--muted);
-      cursor: default;
+      opacity: 0.4;
+      cursor:  default;
     }
+  }
+
+  // A hairline between the buttons and the text, so the strip reads as two things rather than
+  // as an address that happens to start with two arrows.
+  &__nav + &__address {
+    border-left: 1px solid var(--border, #dcdee7);
+    margin-left: 4px;
+    padding-left: 10px;
   }
 
   &__frame {
