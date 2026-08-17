@@ -235,13 +235,12 @@ export default {
     },
 
     /**
-     * From the Conversations tab, which offers to start a workspace that is stopped.
+     * The one way to start a workspace from this page.
      *
-     * The only way in from this page. Start and Stop used to sit on the tab strip as well, on
-     * the argument that they were reachable from every tab and cost no height; what they
-     * actually did was put a button beside four tab labels that is not a tab. The list is where
-     * a workspace is started and stopped, and the tab that has something to say about a stopped
-     * workspace offers it there.
+     * Start and Stop used to sit on the tab strip, on the argument that they were reachable
+     * from every tab and cost no height; what they actually did was put a button beside four
+     * tab labels that is not a tab. The list is where a workspace is started and stopped, and
+     * the banner that replaces the tabs while it is stopped offers it here.
      */
     startFromTab() {
       return this.run(() => setWorkspaceRunning(this.name, true), () => {});
@@ -277,7 +276,33 @@ export default {
       :label="error"
     />
 
+    <!--
+      A stopped workspace is a banner and nothing else.
+
+      The tabs used to stay, with this same banner inside the Conversations one. Every one of
+      them was empty in a different way: no conversations to talk to, no ports being listened
+      on, no sidecars running, and a browser that is not there. Four tabs whose only content is
+      four ways of saying the workspace is stopped is worse than one sentence and the button
+      that fixes it.
+    -->
+    <Banner
+      v-if="stopped"
+      color="info"
+      class="dev-workspace__stopped"
+    >
+      <span>This workspace is stopped, so there is nothing to talk to.</span>
+      <RcButton
+        variant="secondary"
+        size="small"
+        :disabled="busy"
+        @click="startFromTab"
+      >
+        Start it
+      </RcButton>
+    </Banner>
+
     <Tabbed
+      v-else
       class="dev-workspace__tabs"
       :default-tab="tab"
       @changed="onTabChanged"
@@ -291,8 +316,6 @@ export default {
           v-if="seen.conversations"
           :workspace="workspace"
           :log-tail="logTail"
-          :busy="busy"
-          @start="startFromTab"
         />
       </Tab>
 
@@ -349,6 +372,15 @@ export default {
 
     &--message {
       padding: 20px;
+    }
+
+    // The sentence and the button on one line, since the button is what the sentence is about.
+    &__stopped {
+      :deep(.banner__content) {
+        display:     flex;
+        align-items: center;
+        gap:         10px;
+      }
     }
 
     &__tabs {

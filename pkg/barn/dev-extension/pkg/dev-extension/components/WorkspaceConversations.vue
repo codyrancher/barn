@@ -40,8 +40,6 @@ export default {
     RcButton, Banner, DevTerminal, DevList
   },
 
-  emits: ['start'],
-
   props: {
     workspace: {
       type:     Object,
@@ -55,10 +53,6 @@ export default {
       default: '',
     },
 
-    busy: {
-      type:    Boolean,
-      default: false,
-    },
   },
 
   data() {
@@ -89,9 +83,6 @@ export default {
       return this.workspace.state === 'running' || this.workspace.state === 'starting';
     },
 
-    stopped() {
-      return this.workspace.state === 'stopped';
-    },
 
     failing() {
       return this.workspace.state === 'error';
@@ -219,24 +210,7 @@ export default {
 
     <div class="workspace-conversations__pane">
       <Banner
-        v-if="stopped"
-        color="info"
-      >
-        <div class="workspace-conversations__stopped">
-          <span>This workspace is stopped, so there is nothing to talk to.</span>
-          <RcButton
-            variant="secondary"
-            size="small"
-            :disabled="busy"
-            @click="$emit('start')"
-          >
-            Start it
-          </RcButton>
-        </div>
-      </Banner>
-
-      <Banner
-        v-else-if="failing"
+        v-if="failing"
         color="error"
       >
         <p>This workspace is not staying up: {{ progress }}.</p>
@@ -310,11 +284,6 @@ export default {
       color:         var(--muted);
     }
 
-    &__stopped {
-      display:     flex;
-      align-items: center;
-      gap:         10px;
-    }
 
     // The container's own last line. Monospace because it is output, and truncated to one line
     // because this is a status, not a log viewer: the terminal is the log viewer.
