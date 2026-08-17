@@ -461,37 +461,43 @@ export default {
                 @click="commit"
               />
             </div>
-            <label
-              class="ext-files__path"
-              for="ext-file-body"
-            >{{ showing ? `commit ${ showing }` : (selected || 'Nothing open') }}</label>
-
-            <div
-              v-if="showing"
-              class="ext-files__view"
-            >
-              <div
-                v-if="diffLoading"
-                class="text-muted"
-              >
-                Reading the commit
-              </div>
-              <DiffView
-                v-else
-                :patch="diff"
-                :subject="showingSubject"
-              />
-            </div>
-
             <!--
-              Read-only. This is a browser for what is in the pod, not an editor: the editing
-              happens in the pane behind this dialog, by the thing running there, and a second
-              place to change the same files is a second place for them to disagree.
+              One box, with what it is showing named along its top. The name used to be a label
+              floating between the message and the box, which is a third thing to space and the
+              first thing to get squashed when the dialog is short.
             -->
-            <pre
-              v-else
-              class="ext-files__view ext-files__file-body"
-            >{{ contents }}</pre>
+            <div class="ext-files__view">
+              <div class="ext-files__view-head">
+                {{ showing ? `commit ${ showing }` : (selected || 'Nothing open') }}
+              </div>
+
+              <div
+                v-if="showing"
+                class="ext-files__view-body"
+              >
+                <div
+                  v-if="diffLoading"
+                  class="text-muted"
+                >
+                  Reading the commit
+                </div>
+                <DiffView
+                  v-else
+                  :patch="diff"
+                  :subject="showingSubject"
+                />
+              </div>
+
+              <!--
+                Read-only. This is a browser for what is in the pod, not an editor: the editing
+                happens in the pane behind this dialog, by the thing running there, and a second
+                place to change the same files is a second place for them to disagree.
+              -->
+              <pre
+                v-else
+                class="ext-files__view-body ext-files__file-body"
+              >{{ contents }}</pre>
+            </div>
           </div>
         </div>
       </template>
@@ -511,9 +517,14 @@ export default {
 </template>
 
 <style lang="scss" scoped>
-// One gap between the boxes in this dialog. The two columns had 10px, 8px and 5px between
-// their own, which is what made the left and right sides look out of step with each other.
+// Two gaps, and only two. Every space between boxes in this dialog is one of them: the small
+// one between things that belong together, the large one where the pane below needs separating
+// from the control above it. Before this there were four different numbers in here.
 $gap: 10px;
+$gap-large: 20px;
+// The height of a labelled one-line control, which the branch box and the message box both
+// are. Written down because the row holding the message is fixed at it.
+$control-box-height: 61px;
 $message-line: 20;
 // What the Commit button beside the message needs, so the message can stop short of it.
 $commit-button-width: 110px;
@@ -611,14 +622,14 @@ $commit-button-width: 110px;
   // One box for both: the file and a commit's diff are the same question about two things, and
   // switching between them should not also change the shape of the pane.
   &__view {
-    flex:          1 1 auto;
-    min-height:    0;
-    overflow:      auto;
-    margin:        0;
-    padding:       8px 10px;
-    border:        1px solid var(--border);
-    border-radius: var(--border-radius);
-    background:    var(--body-bg);
+    flex:           1 1 auto;
+    min-height:     0;
+    display:        flex;
+    flex-direction: column;
+    overflow:       hidden;
+    border:         1px solid var(--border);
+    border-radius:  var(--border-radius);
+    background:     var(--body-bg);
   }
 
   &__file-body {
@@ -682,21 +693,35 @@ $commit-button-width: 110px;
     }
   }
 
+  // No `gap`: the spacing in this column is not uniform, so it is said on the two elements that
+  // want it rather than once here and then corrected twice.
   &__editor {
     flex:           1 1 auto;
     min-width:      0;
     display:        flex;
     flex-direction: column;
-    gap:            5px;
   }
 
-  &__path {
-    font-size: 11px;
-    font-family: monospace;
-    color: var(--muted);
-    overflow: hidden;
+  &__view-head {
+    // Fixed, so the name of what you are looking at stays put while the body scrolls under it.
+    flex:          0 0 auto;
+    padding:       5px 10px;
+    border-bottom: 1px solid var(--border);
+    background:    var(--accent-btn);
+    font-size:     11px;
+    font-family:   monospace;
+    color:         var(--muted);
+    overflow:      hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space:   nowrap;
+  }
+
+  &__view-body {
+    flex:       1 1 auto;
+    min-height: 0;
+    overflow:   auto;
+    margin:     0;
+    padding:    8px 10px;
   }
 
   &__actions {
@@ -716,10 +741,14 @@ $commit-button-width: 110px;
     align-items:   center;
     justify-content: flex-end;
     gap:           $gap;
-    margin-bottom: $gap;
+    // The larger gap, because what is under it is a whole pane rather than the next control:
+    // the message needs to look like it is above the file view rather than attached to it.
+    margin-bottom: $gap-large;
     // The height of the box at one line. Fixed, so the row keeps its size while the box inside
-    // it grows over what is below.
-    height:        61px;
+    // it grows over what is below - and `flex: 0 0 auto` with it, because a flex item's default
+    // is to shrink and this one was being squeezed from 61px to the 40 its button needs.
+    flex:          0 0 auto;
+    height:        $control-box-height;
   }
 
   &__message {
