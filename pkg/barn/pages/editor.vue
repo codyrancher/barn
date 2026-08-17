@@ -467,26 +467,28 @@ export default {
           mostly off the end.
         -->
         <div class="mc-editor__addressbar">
-          <button
-            type="button"
-            class="mc-editor__nav"
-            title="Back"
-            aria-label="Back"
-            :disabled="!rightUrl"
-            @click="history(-1)"
-          >
-            <i class="icon icon-chevron-left" />
-          </button>
-          <button
-            type="button"
-            class="mc-editor__nav"
-            title="Forward"
-            aria-label="Forward"
-            :disabled="!rightUrl"
-            @click="history(1)"
-          >
-            <i class="icon icon-chevron-right" />
-          </button>
+          <div class="mc-editor__nav-group">
+            <button
+              type="button"
+              class="mc-editor__nav"
+              title="Back"
+              aria-label="Back"
+              :disabled="!rightUrl"
+              @click="history(-1)"
+            >
+              <i class="icon icon-chevron-left" />
+            </button>
+            <button
+              type="button"
+              class="mc-editor__nav"
+              title="Forward"
+              aria-label="Forward"
+              :disabled="!rightUrl"
+              @click="history(1)"
+            >
+              <i class="icon icon-chevron-right" />
+            </button>
+          </div>
           <input
             ref="address"
             v-model="address"
@@ -545,6 +547,8 @@ $divider-width: 8px;
 $control-height: 30px;
 // The recessed strip over the framed pane, and everything in it.
 $address-height: 28px;
+// Rancher's collapsed top-level menu rail: the shell's $app-bar-collapsed-width.
+$rancher-rail-width: 70px;
 
 .mc-editor {
   display: flex;
@@ -709,8 +713,7 @@ $address-height: 28px;
   }
 
   &__nav {
-    flex:            0 0 auto;
-    width:           28px;
+    flex:            1 1 0;
     display:         inline-flex;
     align-items:     center;
     justify-content: center;
@@ -742,12 +745,15 @@ $address-height: 28px;
     }
   }
 
-  // A hairline between the buttons and the text, so the strip reads as two things rather than
-  // as an address that happens to start with two arrows.
-  &__nav + &__address {
-    border-left: 1px solid var(--border, #dcdee7);
-    margin-left: 4px;
-    padding-left: 10px;
+  // The two buttons share the width of Rancher's own collapsed menu rail, so the hairline after
+  // them lands on the edge of that rail in the pane below rather than a few pixels off it. The
+  // number is the shell's `$app-bar-collapsed-width`, repeated because this file cannot import
+  // the shell's variables, and it is a constant of Rancher's layout rather than a taste.
+  &__nav-group {
+    flex:        0 0 $rancher-rail-width;
+    display:     flex;
+    align-items: stretch;
+    border-right: 1px solid var(--border, #dcdee7);
   }
 
   &__frame {
@@ -787,7 +793,7 @@ $address-height: 28px;
   &__address {
     flex:          1 1 auto;
     min-width:     0;
-    padding:       0 8px;
+    padding:       0 10px;
     border:        none;
     border-radius: 0;
     background:    none;
