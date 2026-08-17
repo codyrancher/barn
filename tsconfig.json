@@ -38,6 +38,7 @@
   },
   "exclude": [
     "node_modules",
-    "pkg/barn/dev-extension"
+    "pkg/barn/dev-extension",
+    "pkg/barn/base-extension"
   ]
 }

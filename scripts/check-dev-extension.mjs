@@ -30,7 +30,21 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(here, '..');
-const PKG = path.join(ROOT, 'pkg', 'barn', 'dev-extension', 'pkg', 'dev-extension');
+// Which package to check. Both seeds are real source that nothing else compiles - the barn
+// build excludes them - so this is the only thing standing between a typo in either and a pod
+// that boots into a broken dashboard.
+const PACKAGES = {
+  dev:  path.join(ROOT, 'pkg', 'barn', 'dev-extension', 'pkg', 'dev-extension'),
+  base: path.join(ROOT, 'pkg', 'barn', 'base-extension', 'pkg', 'base'),
+};
+
+const WHICH = process.argv[2] || 'dev';
+const PKG = PACKAGES[WHICH];
+
+if (!PKG) {
+  console.error(`no such package: ${ WHICH }. There is ${ Object.keys(PACKAGES).join(', ') }.`);
+  process.exit(2);
+}
 
 /** Extensions an import can be written without, in the order a bundler would try them. */
 const EXTENSIONS = ['', '.ts', '.vue', '.js', '.mjs', '.json', '/index.ts', '/index.js', '/index.vue'];

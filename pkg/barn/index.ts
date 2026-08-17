@@ -3,7 +3,6 @@ import { IPlugin } from '@shell/core/types';
 import { ensureEditorContent } from './api';
 import { ensureDefaultExtension } from './extensions';
 import { EDITOR_ROUTE, EXTENSION_STARTING_ROUTE } from './editor-product';
-import HeaderButtons from './components/HeaderButtons.vue';
 
 // Init the package
 export default function(plugin: IPlugin): void {
@@ -57,18 +56,13 @@ export default function(plugin: IPlugin): void {
     component: () => import('./pages/extension-starting.vue'),
   });
 
-  // The global buttons, in the header on every page: Editor, and the dev
-  // server DevExtension serves. They were two `addAction(ActionLocation.HEADER)`
-  // calls, which the shell renders as an icon apiece with the label only on the
-  // aria-label, so both arrived as the same anonymous icon and neither said
-  // which was which. NavHeaderRight renders a component of ours instead, so the
-  // buttons can carry their names. See components/HeaderButtons.vue for what
-  // that slot costs.
-  // Cast because the shell types register()'s third argument as `Function | Boolean`, which is
-  // the signature for the other things it registers rather than for a component: a Vue options
-  // object is neither, and the same call is what every extension makes to fill a slot. The dev
-  // server transpiles without checking, so this only ever surfaces in `yarn build-pkg`.
-  plugin.register('component', 'NavHeaderRight', HeaderButtons as any);
+  // Nothing is put in Rancher's header. This used to register a component into NavHeaderRight
+  // carrying an Editor button and the extension box, and that slot is a poor place for them:
+  // it is a single global slot, so the last extension to claim it silently wins, and it is
+  // rendered on every page in Rancher whether or not any of this is what you are doing.
+  //
+  // The flask in the side rail is the way in (see editor-product.ts), and the extension box
+  // lives on the editor's own toolbar, where it is next to the thing it changes.
 
   // Override the core /prefs route with a wrapper that renders the original
   // page plus an "Enable Barn" checkbox (see pages/prefs.vue). The core

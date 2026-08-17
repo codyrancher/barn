@@ -64,6 +64,7 @@ done
 # are what is being worked on.
 if [ "${SKIP_CHECKS:-}" != "1" ]; then
   node "$(dirname "${BASH_SOURCE[0]}")/check-dev-extension.mjs" || exit 1
+  node "$(dirname "${BASH_SOURCE[0]}")/check-dev-extension.mjs" base || exit 1
 fi
 
 pod=$(kubectl -n "$NAMESPACE" get pod -l "app=$APP" \

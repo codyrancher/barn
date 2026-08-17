@@ -23,7 +23,7 @@ import Socket, {
   EVENT_CONNECT_ERROR,
 } from '@shell/utils/socket';
 import {
-  ensureExtension, extensionPod, extensionShellUrl, DEFAULT_EXTENSION
+  ensureExtension, extensionPod, extensionShellUrl, writePodImage, DEFAULT_EXTENSION
 } from '../extensions';
 
 // The dashboard's own build pulls this in globally; an extension's does not, so
@@ -40,6 +40,11 @@ const RESIZE = '4';
 // How often to look for a running pod while there isn't one. A cold pod is
 // pulling an image and installing, so this is a wait of a minute or two.
 const POD_POLL_MS = 3000;
+
+// Where a pasted image lands in the pod. Under /app, so it is on the hostPath and survives a
+// restart, and dotted so it stays out of the extension's own source tree and out of the file
+// browser that lists it.
+const IMAGE_DIR = '/app/.images';
 
 export default {
   name: 'PodTerminal',
@@ -65,6 +70,9 @@ export default {
     return {
       // 'waiting' (no pod yet) | 'connecting' | 'open' | 'closed'
       state:        'waiting',
+      // Set while an image is on its way into the pod, and if it failed to get there.
+      pasting:      false,
+      imageError:   '',
       error:        '',
       terminal:     null,
       fitAddon:     null,
@@ -152,6 +160,16 @@ export default {
 
       terminal.open(this.$refs.xterm);
       terminal.onData((input) => this.send(STDIN + base64Encode(input)));
+
+      // An image pasted or dropped on the pane becomes a file in the pod, and its path is
+      // typed at the prompt. That is the whole trick: claude reads an image from a path, so
+      // handing it one is the same thing as attaching it. xterm's own paste handling only ever
+      // sees text, which is why this listens on the element rather than through the terminal.
+      const pane = this.$refs.xterm;
+
+      pane.addEventListener('paste', (event) => this.onImages(event, event.clipboardData));
+      pane.addEventListener('dragover', (event) => event.preventDefault());
+      pane.addEventListener('drop', (event) => this.onImages(event, event.dataTransfer));
 
       this.terminal = terminal;
 
@@ -257,6 +275,43 @@ export default {
       this.connectWhenPodIsUp();
     },
 
+    /**
+     * Images out of a paste or a drop, into the pod, as a path at the prompt.
+     *
+     * Only images are taken. A paste carrying text is xterm's business and passing it here
+     * would break ordinary copy and paste, which is the thing a terminal is asked to do most.
+     */
+    async onImages(event, source) {
+      const files = [...(source?.files || [])].filter((file) => file.type.startsWith('image/'));
+
+      if (!files.length) {
+        return;
+      }
+
+      event.preventDefault();
+      this.imageError = '';
+
+      for (const file of files) {
+        // Named for when it arrived rather than what the clipboard called it: a pasted
+        // screenshot is usually called `image.png` every single time.
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const extension = (file.type.split('/')[1] || 'png').replace(/[^a-z0-9]/g, '');
+        const path = `${ IMAGE_DIR }/${ stamp }.${ extension }`;
+
+        try {
+          this.pasting = true;
+          await writePodImage(this.extension, path, await file.arrayBuffer());
+          // A trailing space, so a second image or a sentence after it does not run together
+          // with the path.
+          this.send(STDIN + base64Encode(`${ path } `));
+        } catch (e) {
+          this.imageError = e.message || String(e);
+        } finally {
+          this.pasting = false;
+        }
+      }
+    },
+
     send(frame) {
       if (this.state === 'open') {
         this.socket.send(frame);
@@ -299,6 +354,17 @@ export default {
       ref="xterm"
       class="mc-terminal__xterm"
     />
+    <!--
+      A pasted image takes a second or two to get into the pod, and until the path appears at
+      the prompt nothing else says anything happened.
+    -->
+    <div
+      v-if="pasting || imageError"
+      class="mc-terminal__paste"
+      :class="{ 'mc-terminal__paste--error': imageError }"
+    >
+      {{ imageError || 'Putting the image in the pod' }}
+    </div>
     <div
       v-if="state !== 'open'"
       class="mc-terminal__status"
@@ -348,6 +414,23 @@ export default {
   min-width: 0;
   padding: 4px 0 0 6px;
   background: var(--terminal-bg, var(--body-bg));
+
+  &__paste {
+    position:      absolute;
+    right:         10px;
+    bottom:        10px;
+    z-index:       2;
+    padding:       4px 8px;
+    border-radius: var(--border-radius);
+    background:    var(--default);
+    color:         var(--body-text);
+    font-size:     11px;
+
+    &--error {
+      background: var(--error);
+      color:      var(--error-text, #fff);
+    }
+  }
 
   &__xterm {
     flex: 1 1 auto;

@@ -24,7 +24,7 @@
 //     -- bash -c 'cd /app/pkg/dev-extension && exec bash'
 // ---------------------------------------------------------------------------
 import { rancherFetch } from './api';
-import { SEED_FILES } from './dev-extension-seed.generated';
+import { SEEDS } from './dev-extension-seed.generated';
 
 // The `local` cluster, like the editor's content pod: the extension loads in
 // contexts that have no cluster of their own, and a dev server should be at one
@@ -222,16 +222,96 @@ function extGet(type: string, object: string): Promise<any> {
   return rancherFetch(`${ EXT_BASE }/v1/${ type }/${ EXT_NS }/${ object }`).catch(() => null);
 }
 
-function seedData(): Record<string, string> {
+/**
+ * Where a new extension's files come from.
+ *
+ * A baked-in seed (`dev`, this product's own extension, or `base`, the stock one) or the live
+ * tree of an extension already running here. The last is the interesting case: it is a copy of
+ * what somebody has been editing, including whatever they changed an hour ago, which is not
+ * something a baked-in seed can be.
+ */
+export const BUILT_IN_SEEDS = Object.keys(SEEDS);
+
+export const DEFAULT_SEED = 'dev';
+
+function seedFiles(source: string): Record<string, string> {
+  return SEEDS[source] || SEEDS[DEFAULT_SEED];
+}
+
+function seedData(files: Record<string, string>): Record<string, string> {
   // boot.sh is the container's command and is read straight out of /seed, so it
   // keeps its own name; everything else is a path in the tree.
   const data: Record<string, string> = {};
 
-  for (const [filePath, contents] of Object.entries(SEED_FILES)) {
+  for (const [filePath, contents] of Object.entries(files)) {
     data[encodeSeedKey(filePath)] = contents;
   }
 
   return data;
+}
+
+/**
+ * The files of a running extension, read out of its pod.
+ *
+ * One exec, not one per file. The obvious version - list, then read each - is forty-odd
+ * websockets and the better part of a minute, and it gets slower as somebody's extension grows.
+ * So a small node script is written into the pod and run there, and what comes back is a single
+ * JSON object.
+ *
+ * The script arrives base64-encoded rather than as a quoted argument. It is JavaScript inside a
+ * `sh -c` inside a URL query parameter, and every layer of that has its own opinion about
+ * quotes; encoding it means none of them gets a say.
+ */
+const CLONE_SCRIPT = `
+const fs = require('fs');
+const path = require('path');
+const root = fs.readdirSync('/app/pkg').map((d) => path.join('/app/pkg', d)).filter((d) => fs.statSync(d).isDirectory())[0];
+const out = {};
+(function walk(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) walk(full);
+    else out['pkg/' + path.relative('/app/pkg', full)] = fs.readFileSync(full, 'utf8');
+  }
+})(root);
+process.stdout.write(JSON.stringify(out));
+`;
+
+async function cloneFiles(source: string): Promise<Record<string, string>> {
+  const pod = await extensionPod(source);
+
+  if (!pod) {
+    throw new Error(`${ source } has no running pod to copy from`);
+  }
+
+  const encoded = btoa(CLONE_SCRIPT);
+  const script = '/tmp/barn-clone.js';
+
+  await podExecOnce(pod, asPodUser(`echo ${ encoded } | base64 -d > ${ script }`));
+
+  const out = await podExecOnce(pod, asPodUser(`node ${ script }`));
+
+  let tree: Record<string, string>;
+
+  try {
+    tree = JSON.parse(out);
+  } catch {
+    throw new Error(`could not read ${ source }'s tree: ${ out.slice(0, 200) || 'no output' }`);
+  }
+
+  // The package keeps the directory name it had in the pod it came from, which is what makes
+  // this a copy rather than a rename. The skeleton and the pod scripts come from the default
+  // seed, because they are the same in every extension and are not part of what was cloned.
+  const skeleton = { ...seedFiles(DEFAULT_SEED) };
+
+  for (const key of Object.keys(skeleton)) {
+    if (key.startsWith('pkg/')) {
+      delete skeleton[key];
+    }
+  }
+
+  return { ...skeleton, ...tree };
 }
 
 function deployment(name: string): Record<string, unknown> {
@@ -355,7 +435,7 @@ const ensureInFlight: Record<string, Promise<void> | undefined> = {};
  * Deployment and Service are create-if-missing, because replacing them would
  * restart a dev server somebody is editing in.
  */
-export function ensureExtension(name: string): Promise<void> {
+export function ensureExtension(name: string, source = DEFAULT_SEED): Promise<void> {
   const inFlight = ensureInFlight[name];
 
   if (inFlight) {
@@ -371,7 +451,10 @@ export function ensureExtension(name: string): Promise<void> {
     // already have, so this adds new files to a running tree without touching
     // what has been edited in there.
     const cm = await extGet('configmaps', object);
-    const data = seedData();
+    // A clone reads the source pod; a built-in seed is already here. Either way the result is
+    // one ConfigMap, and from the pod's point of view there is no difference between them.
+    const files = BUILT_IN_SEEDS.includes(source) ? seedFiles(source) : await cloneFiles(source);
+    const data = seedData(files);
 
     if (cm) {
       await rancherFetch(`${ EXT_BASE }/v1/configmaps/${ EXT_NS }/${ object }`, {
@@ -672,6 +755,60 @@ export async function countChanges(name: string): Promise<number> {
   const out = await inPackage(name, 'git status --porcelain 2>/dev/null | wc -l');
 
   return parseInt(out.trim(), 10) || 0;
+}
+
+/**
+ * Write a binary file into an extension's pod.
+ *
+ * For images pasted into the terminal. Base64 all the way in, because the payload is binary and
+ * everything between here and the file is a shell: the exec subresource takes argv, the argv is
+ * a `sh -c` script, and a PNG put through that directly would be mangled by the first byte that
+ * looked like a quote.
+ *
+ * Chunked, because a screenshot is a megabyte or two and the whole command is a URL query
+ * parameter on the exec websocket. There is no documented ceiling on that and the ones that
+ * exist are in whatever proxies the request, so this appends in pieces small enough that none
+ * of them is anywhere near a limit rather than finding out where the limit is in production.
+ */
+const IMAGE_CHUNK = 48 * 1024;
+
+export async function writePodImage(name: string, path: string, data: ArrayBuffer): Promise<void> {
+  const pod = await extensionPod(name);
+
+  if (!pod) {
+    throw new Error(`${ name } has no running pod to write to`);
+  }
+
+  const bytes = new Uint8Array(data);
+  let binary = '';
+
+  // A chunk at a time rather than String.fromCharCode(...bytes), which blows the argument limit
+  // and throws on anything the size of a screenshot.
+  for (let i = 0; i < bytes.length; i += 8192) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+  }
+
+  const encoded = btoa(binary);
+  const quoted = shellQuote(path);
+  const stage = `${ quoted }.b64`;
+
+  await podExecOnce(pod, asPodUser(`mkdir -p "$(dirname ${ quoted })" && : > ${ stage }`));
+
+  for (let i = 0; i < encoded.length; i += IMAGE_CHUNK) {
+    const chunk = encoded.slice(i, i + IMAGE_CHUNK);
+
+    // printf %s rather than echo: the payload is base64, which cannot contain a quote or a
+    // backslash, so this is safe, and echo would interpret escapes on some shells.
+    await podExecOnce(pod, asPodUser(`printf %s '${ chunk }' >> ${ stage }`));
+  }
+
+  const out = await podExecOnce(pod, asPodUser(
+    `base64 -d ${ stage } > ${ quoted } && rm -f ${ stage } && wc -c < ${ quoted }`
+  ));
+
+  if (!parseInt(out.trim(), 10)) {
+    throw new Error(`the image did not land in ${ name }`);
+  }
 }
 
 /** Single-quote for `sh`, the only form that needs no other escaping inside it. */

@@ -22,8 +22,10 @@ import AsyncButton from '@shell/components/AsyncButton';
 import { RcButton } from '@components/RcButton';
 import PublishStatus from '../components/PublishStatus.vue';
 import ExtensionFilesModal from '../components/ExtensionFilesModal.vue';
+import NewExtensionModal from '../components/NewExtensionModal.vue';
 import {
-  ensureExtension, extensionReady, extensionUrl, publishExtension, DEFAULT_EXTENSION
+  ensureExtension, extensionReady, extensionUrl, extensionProxyPath, publishExtension,
+  DEFAULT_EXTENSION
 } from '../extensions';
 import { EXTENSION_STARTING_ROUTE } from '../editor-product';
 
@@ -67,7 +69,7 @@ export default {
   name: 'BarnEditor',
 
   components: {
-    RcIcon, RcButton, PodTerminal, ExtensionSelect, ExtensionFilesModal, AsyncButton,
+    RcIcon, RcButton, PodTerminal, ExtensionSelect, ExtensionFilesModal, NewExtensionModal, AsyncButton,
     PublishStatus
   },
 
@@ -83,6 +85,15 @@ export default {
       // Whether the source browser is open. The left bar is about the source and about claude,
       // and this is the first thing on it.
       showFiles: false,
+      // The name typed into the box that does not exist yet, held while the modal asks what it
+      // should be a copy of.
+      creating:  '',
+      // What the right pane is showing, as a path inside the framed dashboard. Kept in sync
+      // with the iframe by a poll rather than by its load event, because the thing in there is
+      // a single-page app: it changes its URL with pushState and never loads again.
+      address:      '',
+      addressFocused: false,
+      addressTimer: null,
       // What the last publish did and said. The stage is what the bar counts; the log is kept
       // whether it worked or not, because a build log is worth reading either way.
       publishStage: 0,
@@ -131,6 +142,7 @@ export default {
     // The terminal brings itself up (it waits on the pod, not on the dev
     // server), so nothing here has to wait for the left pane.
     this.waitForDevServer();
+    this.addressTimer = setInterval(() => this.readAddress(), 1000);
 
     // What the page needs from the template it is under, and cannot ask for from inside its
     // own scope: see the unscoped style block at the bottom. The class goes on <html> rather
@@ -144,6 +156,7 @@ export default {
   beforeUnmount() {
     this.unmounted = true;
     clearTimeout(this.devPollTimer);
+    clearInterval(this.addressTimer);
     document.documentElement.classList.remove('barn-editor-page');
   },
 
@@ -218,6 +231,39 @@ export default {
       this.split = clampSplit(percent);
     },
 
+    /**
+     * Where the framed dashboard currently is.
+     *
+     * Readable at all because it is same-origin: the pane is served through the apiserver's
+     * proxy, which is on Rancher's own origin, so this is an ordinary property access rather
+     * than something that needs the frame to cooperate. The try/catch is for the moment during
+     * a navigation when contentWindow is briefly not there.
+     *
+     * The proxy prefix comes off for display. Leaving it on would mean a box that is three
+     * quarters boilerplate and whose interesting part is off the right-hand edge.
+     */
+    readAddress() {
+      if (this.addressFocused) {
+        return;
+      }
+
+      try {
+        const href = this.$refs.frame?.contentWindow?.location?.href;
+
+        if (href) {
+          this.address = href.replace(window.location.origin, '').replace(extensionProxyPath(this.extension), '') || '/';
+        }
+      } catch { /* mid-navigation, or not framed yet */ }
+    },
+
+    /** Go where the box says. A path, so what is typed reads like a Rancher URL. */
+    go() {
+      const path = this.address.startsWith('/') ? this.address : `/${ this.address }`;
+
+      this.$refs.frame.contentWindow.location.href = `${ extensionProxyPath(this.extension) }${ path }`;
+      this.$refs.address?.blur();
+    },
+
     openExtension(name) {
       this.$router.push({ name: this.$route.name, params: { extension: name } });
     },
@@ -255,9 +301,23 @@ export default {
       }
     },
 
+    // A name that is not one of ours yet. What it should start as is a question rather than a
+    // default, so this opens the modal instead of creating anything.
     createExtension(name) {
-      ensureExtension(name);
-      this.$router.push({ name: EXTENSION_STARTING_ROUTE, params: { extension: name } });
+      this.creating = name;
+    },
+
+    async onCreate({ name, source, done }) {
+      try {
+        await ensureExtension(name, source);
+        done(true);
+        this.creating = '';
+        this.$router.push({ name: EXTENSION_STARTING_ROUTE, params: { extension: name } });
+      } catch (e) {
+        done(false);
+        this.creating = '';
+        this.publishError = e.message || String(e);
+      }
     },
   },
 };
@@ -287,6 +347,17 @@ export default {
       </div>
       <div class="mc-editor__bar-gap" />
       <div class="mc-editor__bar mc-editor__bar--right">
+        <input
+          ref="address"
+          v-model="address"
+          class="mc-editor__address"
+          spellcheck="false"
+          aria-label="Address of the framed dashboard"
+          :disabled="!rightUrl"
+          @focus="addressFocused = true"
+          @blur="addressFocused = false"
+          @keydown.enter="go"
+        >
         <PublishStatus
           :stage="publishStage"
           :total="publishTotal"
@@ -343,9 +414,11 @@ export default {
       </div>
       <iframe
         v-if="rightUrl"
+        ref="frame"
         class="mc-editor__pane mc-editor__pane--right"
         :src="rightUrl"
         :title="extension"
+        @load="readAddress"
       />
       <div
         v-else
@@ -367,6 +440,13 @@ export default {
       v-if="showFiles"
       :extension="extension"
       @close="showFiles = false"
+    />
+
+    <NewExtensionModal
+      v-if="creating"
+      :name="creating"
+      @close="creating = ''"
+      @create="onCreate"
     />
   </div>
 </template>
@@ -462,10 +542,27 @@ $divider-width: 8px;
     display: none;
   }
 
-  // Hard against the right edge, where the link to a new tab used to be. The bar is otherwise
-  // empty, so this is the whole of it.
+  // The address takes what the controls after it do not, so the bar reads left to right as
+  // where you are, then what is happening, then what you can do about it.
+  &__address {
+    flex:          1 1 auto;
+    min-width:     0;
+    height:        32px;
+    padding:       0 8px;
+    border:        1px solid var(--border, #dcdee7);
+    border-radius: var(--border-radius);
+    background:    var(--body-bg, #fff);
+    color:         var(--body-text);
+    font-family:   monospace;
+    font-size:     12px;
+
+    &:disabled {
+      color: var(--muted);
+    }
+  }
+
   &__bar-select {
-    margin-left: auto;
+    flex: 0 0 auto;
   }
 
   &__panes {
