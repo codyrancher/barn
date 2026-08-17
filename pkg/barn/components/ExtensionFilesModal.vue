@@ -517,9 +517,12 @@ export default {
 </template>
 
 <style lang="scss" scoped>
-// Two gaps, and only two. Every space between boxes in this dialog is one of them: the small
-// one between things that belong together, the large one where the pane below needs separating
-// from the control above it. Before this there were four different numbers in here.
+// Two gaps, and only two, used the same way in both columns: the large one under the control at
+// the top of a column, the small one between the boxes below it. Said as margins rather than as
+// the column's `gap`, because the two are not the same value and a `gap` can only be one.
+//
+// Using the large one on the right and the small one on the left is what the first attempt did,
+// and it left the second box in each column ten pixels out of step with the other.
 $gap: 10px;
 $gap-large: 20px;
 // The height of a labelled one-line control, which the branch box and the message box both
@@ -541,8 +544,13 @@ $commit-button-width: 110px;
     flex:           0 0 300px;
     display:        flex;
     flex-direction: column;
-    gap:            $gap;
     min-height:     0;
+  }
+
+  &__branch {
+    // The same gap under it as the commit message has, so the box below each of them starts at
+    // the same height.
+    margin-bottom: $gap-large;
   }
 
   &__tree {
@@ -559,6 +567,7 @@ $commit-button-width: 110px;
   // leaves the room to the tree, which is the thing being navigated.
   &__commits {
     flex:          0 0 auto;
+    margin-bottom: $gap;
     overflow-y:    auto;
     border:        1px solid var(--border);
     border-radius: var(--border-radius);
