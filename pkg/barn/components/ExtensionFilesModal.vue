@@ -20,9 +20,10 @@ import { Card } from '@components/Card';
 import { RcButton } from '@components/RcButton';
 import { Banner } from '@components/Banner';
 import FileTree from './FileTree.vue';
+import DiffView from './DiffView.vue';
 import {
-  ensureExtensionRepo, listExtensionFiles, readExtensionFile, writeExtensionFile,
-  listBranches, checkoutBranch, listCommits, commitExtension, countChanges
+  ensureExtensionRepo, listExtensionFiles, readExtensionFile,
+  listBranches, checkoutBranch, listCommits, commitExtension, countChanges, showCommit
 } from '../extensions';
 
 /**
@@ -90,11 +91,24 @@ function collapse(node) {
   return node;
 }
 
+/**
+ * The commit message box: one line to start with, ten at most.
+ *
+ * The line height is ours rather than inherited, because the maximum is expressed in lines and
+ * a maximum in pixels that happens to be ten lines today is one that quietly becomes nine when
+ * somebody changes a font.
+ */
+const MESSAGE_LINE = 20;
+const MESSAGE_LINES = 10;
+
+/** How many commits the list shows before it has to be asked for the rest. */
+const COMMITS_SHOWN = 3;
+
 export default {
   name: 'ExtensionFilesModal',
 
   components: {
-    AppModal, AsyncButton, LabeledSelect, LabeledInput, Card, RcButton, Banner, FileTree
+    AppModal, AsyncButton, LabeledSelect, LabeledInput, Card, RcButton, Banner, FileTree, DiffView
   },
 
   props: {
@@ -109,6 +123,8 @@ export default {
 
   data() {
     return {
+      MESSAGE_LINE,
+      MESSAGE_LINES,
       files:    [],
       branches: [],
       branch:   '',
@@ -116,19 +132,20 @@ export default {
       changes:  0,
       selected: '',
       contents: '',
-      // What was read, so Save is offered only when there is something to save.
-      original: '',
       message:  '',
       loading:  true,
       error:    '',
+      // The commit whose diff is on screen, and the diff itself. Opening one replaces the file
+      // view, because they are the same question - what does this look like - about two
+      // different things, and two panes of it would halve both.
+      showing:  '',
+      diff:     '',
+      diffLoading: false,
+      allCommits:  false,
     };
   },
 
   computed: {
-    dirty() {
-      return this.contents !== this.original;
-    },
-
     tree() {
       let node = collapse(buildTree(this.files));
 
@@ -143,6 +160,26 @@ export default {
 
     branchOptions() {
       return this.branches.map((branch) => ({ label: branch, value: branch }));
+    },
+
+    visibleCommits() {
+      return this.allCommits ? this.commits : this.commits.slice(0, COMMITS_SHOWN);
+    },
+
+    hiddenCommits() {
+      return Math.max(0, this.commits.length - COMMITS_SHOWN);
+    },
+
+    /**
+     * The diff, split so each line can be coloured.
+     *
+     * Four kinds, which is all a unified diff needs: the file headers, the hunk markers, and the
+     * two directions. `+++` and `---` are checked before `+` and `-` or every file header would
+     * be painted as an added and a removed line.
+     */
+    /** The subject of the commit being shown, for the line above its diff. */
+    showingSubject() {
+      return this.commits.find((entry) => entry.sha === this.showing)?.subject || '';
     },
   },
 
@@ -201,10 +238,26 @@ export default {
         this.files[0];
     },
 
+    /** Show a commit instead of a file. */
+    async openCommit(sha) {
+      this.showing = sha;
+      this.diff = '';
+      this.diffLoading = true;
+
+      try {
+        this.diff = await showCommit(this.extension, sha);
+      } catch (e) {
+        this.error = e.message || String(e);
+      } finally {
+        this.diffLoading = false;
+      }
+    },
+
     async open(path) {
+      // Opening a file puts the diff away: the pane shows one thing at a time.
+      this.showing = '';
       this.selected = path;
       this.contents = await readExtensionFile(this.extension, path);
-      this.original = this.contents;
     },
 
     /**
@@ -240,17 +293,6 @@ export default {
       await this.open(this.selected);
     },
 
-    async save(done) {
-      try {
-        await writeExtensionFile(this.extension, this.selected, this.contents);
-        this.original = this.contents;
-        this.changes = await countChanges(this.extension);
-        done(true);
-      } catch (e) {
-        this.error = e.message || String(e);
-        done(false);
-      }
-    },
 
     async commit(done) {
       try {
@@ -319,6 +361,46 @@ export default {
               @update:value="onBranch"
             />
 
+            <div
+              class="ext-files__commits"
+              :class="{ 'ext-files__commits--all': allCommits }"
+            >
+              <div class="ext-files__heading">
+                Commits on {{ branch }}
+              </div>
+              <ol>
+                <li
+                  v-for="entry in visibleCommits"
+                  :key="entry.sha"
+                >
+                  <button
+                    type="button"
+                    class="ext-files__commit-row"
+                    :class="{ 'ext-files__commit-row--current': entry.sha === showing }"
+                    @click="openCommit(entry.sha)"
+                  >
+                    <span class="ext-files__sha">{{ entry.sha }}</span>
+                    <span class="ext-files__subject">{{ entry.subject }}</span>
+                    <span class="ext-files__when">{{ entry.when }}</span>
+                  </button>
+                </li>
+              </ol>
+              <div
+                v-if="!commits.length"
+                class="text-muted"
+              >
+                None yet.
+              </div>
+              <button
+                v-if="hiddenCommits || allCommits"
+                type="button"
+                class="ext-files__more"
+                @click="allCommits = !allCommits"
+              >
+                {{ allCommits ? 'Show fewer' : `Show all ${ commits.length }` }}
+              </button>
+            </div>
+
             <nav class="ext-files__tree">
               <FileTree
                 v-for="dir in tree.dirs"
@@ -339,71 +421,89 @@ export default {
               </button>
             </nav>
 
-            <div class="ext-files__commits">
-              <div class="ext-files__heading">
-                Commits on {{ branch }}
-              </div>
-              <ol>
-                <li
-                  v-for="entry in commits"
-                  :key="entry.sha"
-                >
-                  <span class="ext-files__sha">{{ entry.sha }}</span>
-                  <span class="ext-files__subject">{{ entry.subject }}</span>
-                  <span class="ext-files__when">{{ entry.when }}</span>
-                </li>
-              </ol>
-              <div
-                v-if="!commits.length"
-                class="text-muted"
-              >
-                None yet.
-              </div>
-            </div>
           </div>
 
           <div class="ext-files__editor">
+            <!--
+              The commit and what it is about, over the file being edited rather than in the
+              footer beside Close. A message describes work in this pane, and down there it was
+              as far from that work as the dialog allowed.
+            -->
+            <div
+              v-if="changes"
+              class="ext-files__commit"
+            >
+              <!--
+                Labelled, like the branch box across from it. A LabeledSelect carrying a label
+                is a two-row control and a placeholder-only input is one, so without this they
+                were different heights side by side for a structural reason rather than a
+                stylistic one.
+
+                It grows downward over the file view rather than pushing it, which is what the
+                absolute positioning below is for: a commit message that runs to a paragraph is
+                normal, and the file underneath sliding down every time somebody presses return
+                is not something to do to a person who is reading it.
+              -->
+              <LabeledInput
+                v-model:value="message"
+                class="ext-files__message"
+                type="multiline"
+                :label="`Commit message (${ changes } changed file${ changes === 1 ? '' : 's' })`"
+                :compact-input="true"
+                :min-height="MESSAGE_LINE"
+                :max-height="MESSAGE_LINE * MESSAGE_LINES"
+              />
+              <AsyncButton
+                mode="edit"
+                action-label="Commit"
+                waiting-label="Committing"
+                success-label="Committed"
+                @click="commit"
+              />
+            </div>
             <label
               class="ext-files__path"
               for="ext-file-body"
-            >{{ selected || 'Nothing open' }}</label>
-            <textarea
-              id="ext-file-body"
-              v-model="contents"
-              spellcheck="false"
-            />
+            >{{ showing ? `commit ${ showing }` : (selected || 'Nothing open') }}</label>
+
+            <div
+              v-if="showing"
+              class="ext-files__view"
+            >
+              <div
+                v-if="diffLoading"
+                class="text-muted"
+              >
+                Reading the commit
+              </div>
+              <DiffView
+                v-else
+                :patch="diff"
+                :subject="showingSubject"
+              />
+            </div>
+
+            <!--
+              Read-only. This is a browser for what is in the pod, not an editor: the editing
+              happens in the pane behind this dialog, by the thing running there, and a second
+              place to change the same files is a second place for them to disagree.
+            -->
+            <pre
+              v-else
+              class="ext-files__view ext-files__file-body"
+            >{{ contents }}</pre>
           </div>
         </div>
       </template>
 
       <template #actions>
         <div class="ext-files__actions">
-          <LabeledInput
-            v-if="changes"
-            v-model:value="message"
-            class="ext-files__message"
-            :placeholder="`Commit message for ${ changes } changed file(s)`"
-            :compact-input="true"
-          />
-          <AsyncButton
-            v-if="changes"
-            mode="edit"
-            action-label="Commit"
-            waiting-label="Committing"
-            success-label="Committed"
-            @click="commit"
-          />
           <RcButton
             variant="tertiary"
             @click="$emit('close')"
           >
             Close
           </RcButton>
-          <AsyncButton
-            mode="apply"
-            :disabled="!dirty || !selected"
-            @click="save"
-          />
         </div>
       </template>
     </Card>
@@ -411,6 +511,13 @@ export default {
 </template>
 
 <style lang="scss" scoped>
+// One gap between the boxes in this dialog. The two columns had 10px, 8px and 5px between
+// their own, which is what made the left and right sides look out of step with each other.
+$gap: 10px;
+$message-line: 20;
+// What the Commit button beside the message needs, so the message can stop short of it.
+$commit-button-width: 110px;
+
 .ext-files {
   &__panes {
     display: flex;
@@ -420,11 +527,11 @@ export default {
   }
 
   &__side {
-    flex: 0 0 300px;
-    display: flex;
+    flex:           0 0 300px;
+    display:        flex;
     flex-direction: column;
-    gap: 10px;
-    min-height: 0;
+    gap:            $gap;
+    min-height:     0;
   }
 
   &__tree {
@@ -437,28 +544,89 @@ export default {
     padding: 5px;
   }
 
+  // Three commits by default and no scroll: at three it is a glance rather than a list, and it
+  // leaves the room to the tree, which is the thing being navigated.
   &__commits {
-    flex: 0 0 auto;
-    max-height: 30%;
-    overflow-y: auto;
-    border: 1px solid var(--border);
+    flex:          0 0 auto;
+    overflow-y:    auto;
+    border:        1px solid var(--border);
     border-radius: var(--border-radius);
-    padding: 5px;
+    padding:       5px;
+
+    // Expanded, it scrolls rather than growing without limit, so the tree keeps a usable share
+    // of the pane however long the history is.
+    &--all {
+      max-height: 40%;
+    }
 
     ol {
       list-style: none;
-      margin: 0;
-      padding: 0;
+      margin:     0;
+      padding:    0;
+    }
+  }
+
+  &__commit-row {
+    display:       flex;
+    gap:           6px;
+    align-items:   baseline;
+    width:         100%;
+    padding:       1px 4px;
+    border:        none;
+    border-radius: var(--border-radius);
+    background:    none;
+    text-align:    left;
+    font-size:     11px;
+    line-height:   20px;
+    // Both, because the shell puts a minimum height on every button for touch targets, which
+    // here would make three commits as tall as the tree.
+    height:        22px;
+    min-height:    0;
+    white-space:   nowrap;
+    cursor:        pointer;
+
+    &:hover {
+      background: var(--nav-hover, var(--accent-btn));
     }
 
-    li {
-      display: flex;
-      gap: 6px;
-      align-items: baseline;
-      font-size: 11px;
-      line-height: 20px;
-      white-space: nowrap;
+    &--current {
+      background:  var(--accent-btn);
+      font-weight: 600;
     }
+  }
+
+  &__more {
+    display:         block;
+    margin:          2px 0 0 4px;
+    padding:         0;
+    border:          none;
+    min-height:      0;
+    background:      none;
+    color:           var(--link);
+    font-size:       11px;
+    cursor:          pointer;
+    text-decoration: underline;
+  }
+
+  // One box for both: the file and a commit's diff are the same question about two things, and
+  // switching between them should not also change the shape of the pane.
+  &__view {
+    flex:          1 1 auto;
+    min-height:    0;
+    overflow:      auto;
+    margin:        0;
+    padding:       8px 10px;
+    border:        1px solid var(--border);
+    border-radius: var(--border-radius);
+    background:    var(--body-bg);
+  }
+
+  &__file-body {
+    font-family: monospace;
+    font-size:   12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break:  break-word;
   }
 
   &__heading {
@@ -515,11 +683,11 @@ export default {
   }
 
   &__editor {
-    flex: 1 1 auto;
-    min-width: 0;
-    display: flex;
+    flex:           1 1 auto;
+    min-width:      0;
+    display:        flex;
     flex-direction: column;
-    gap: 5px;
+    gap:            5px;
   }
 
   &__path {
@@ -531,15 +699,6 @@ export default {
     white-space: nowrap;
   }
 
-  textarea {
-    flex: 1 1 auto;
-    width: 100%;
-    resize: none;
-    font-family: monospace;
-    font-size: 12px;
-    line-height: 1.5;
-  }
-
   &__actions {
     display: flex;
     gap: 10px;
@@ -548,11 +707,51 @@ export default {
     width: 100%;
   }
 
+  &__commit {
+    position:      relative;
+    display:       flex;
+    // Against the middle of the box beside it, which is where it looks like it belongs while
+    // that box is one line tall - and it stays there when the box grows over the view below,
+    // because the row's own height does not change.
+    align-items:   center;
+    justify-content: flex-end;
+    gap:           $gap;
+    margin-bottom: $gap;
+    // The height of the box at one line. Fixed, so the row keeps its size while the box inside
+    // it grows over what is below.
+    height:        61px;
+  }
+
   &__message {
-    // Takes the room the buttons do not, so a message is typed in place rather than in a
-    // second dialog on top of this one.
-    flex: 1 1 auto;
-    max-width: 420px;
+    // Out of the flow, so growing changes nothing about the layout around it. The right edge
+    // stops short of the button, which stays where it is.
+    //
+    // A width rather than a `right`, because LabeledInput sets `width: 100%` on itself: left,
+    // right and width together over-constrain the box, and the rule is that `right` is the one
+    // dropped. The symptom was the message lying across the Commit button and hiding it.
+    position: absolute;
+    top:      0;
+    left:     0;
+    width:    calc(100% - #{$commit-button-width});
+    z-index:  10;
+
+    // Only the line height and the resize grip. The `min-height: 0 !important` that used to be
+    // here was me overriding the shell's layout rather than reading it: LabeledInput makes room
+    // for its floating label with the field's own padding, and zeroing the minimum collapsed
+    // that, so the text started at the same height as the label it was supposed to sit under.
+    // The minimum belongs on the component's own prop, which is where it is.
+    :deep(textarea) {
+      line-height: #{$message-line}px;
+      resize:      none;
+    }
+
+    // Only once it has outgrown one line: a box that casts a shadow while it is the same size
+    // as everything else looks like a mistake rather than like something on top.
+    &:focus-within,
+    &.ext-files__message--tall {
+      box-shadow:    0 4px 12px rgba(0, 0, 0, 0.15);
+      border-radius: var(--border-radius);
+    }
   }
 }
 </style>

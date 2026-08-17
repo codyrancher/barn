@@ -102,8 +102,15 @@ export default {
 
   // Muted, because a directory is the address of a file rather than a thing to open, and the
   // files are what the eye should land on.
+  //
+  // A flex row rather than the shared `display: block`, so the caret is centred against the
+  // name instead of sitting on its baseline. An inline-block at a smaller font size aligns to
+  // the baseline of the text beside it, which for a triangle glyph put it above the middle of
+  // the row, and rotating it on open moved it again.
   &__dir {
-    color: var(--muted);
+    display:     flex;
+    align-items: center;
+    color:       var(--muted);
   }
 
   &__file {
@@ -127,11 +134,16 @@ export default {
   }
 
   &__caret {
-    display:    inline-block;
-    width:      12px;
-    font-size:  10px;
-    color:      var(--muted);
-    transition: transform 100ms;
+    flex:            0 0 12px;
+    display:         inline-flex;
+    align-items:     center;
+    justify-content: center;
+    // Its own line box, so the glyph is centred in the square rather than resting on the text's
+    // baseline, and so the rotation below turns about the middle of that square.
+    line-height:     1;
+    font-size:       10px;
+    color:           var(--muted);
+    transition:      transform 100ms;
 
     &--open {
       transform: rotate(90deg);

@@ -674,26 +674,6 @@ export async function readExtensionFile(name: string, path: string): Promise<str
   return inPackage(name, `cat ${ shellQuote(path) } 2>/dev/null`);
 }
 
-/**
- * Write one back.
- *
- * Through base64 rather than a here-doc: these are source files full of backticks, dollars and
- * quotes, and every one of those is something a shell would interpret on the way in.
- */
-export async function writeExtensionFile(name: string, path: string, contents: string): Promise<void> {
-  const pod = await extensionPod(name);
-
-  if (!pod) {
-    throw new Error(`${ name } has no running pod to write to`);
-  }
-
-  // btoa is byte-oriented and these files are UTF-8, so the string is widened first.
-  const encoded = btoa(String.fromCharCode(...new TextEncoder().encode(contents)));
-  const quoted = shellQuote(path);
-
-  await inPackage(name, `mkdir -p "$(dirname ${ quoted })" && echo ${ encoded } | base64 -d > ${ quoted }`);
-}
-
 export interface ExtensionBranches {
   current: string;
   branches: string[];
@@ -739,6 +719,19 @@ export async function listCommits(name: string, limit = 50): Promise<ExtensionCo
       sha, subject, when, who
     };
   });
+}
+
+/**
+ * One commit's diff, as the text `git show` produces.
+ *
+ * Parsed by DiffView into files, hunks and numbered lines, which is what makes it look like the
+ * diff on a pull request rather than like terminal output pasted into a dialog.
+ *
+ * No `--stat`, because DiffView counts its own totals from the patch, and no colour, because
+ * this goes into HTML rather than a terminal.
+ */
+export async function showCommit(name: string, sha: string): Promise<string> {
+  return inPackage(name, `git show --patch --no-color ${ shellQuote(sha) } 2>&1`);
 }
 
 /** Commit whatever is currently different, which is how an edit here becomes history. */
