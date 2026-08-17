@@ -1,5 +1,5 @@
 /**
- * A real Rancher for a workspace, as `charts/closet/templates/rancher.yaml` already does it.
+ * A real Rancher for a workspace, as `deploy/closet/templates/rancher.yaml` already does it.
  *
  * The obvious approach does not work and it is worth writing down why, because it is the reason
  * everything below is shaped the way it is. `rancher/rancher` is the docker-style image with an

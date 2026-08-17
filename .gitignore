@@ -71,3 +71,11 @@ Thumbs.db
 
 # Locally built assets (extensions)
 dist-pkg
+
+# What `yarn publish-pkgs` leaves behind on a local run. These belong on the gh-pages branch,
+# written there by CI, and a copy of them on main is the thing that would eventually be
+# committed by accident and then served as the real index.
+/assets
+/charts
+/extensions
+/index.yaml
