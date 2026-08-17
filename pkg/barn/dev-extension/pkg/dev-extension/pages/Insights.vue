@@ -235,13 +235,13 @@ export default {
 <style lang="scss" scoped>
   .dev-insights {
     overflow-y: auto;
-    padding:    20px;
+    padding:    var(--dev-space-5);
 
     header {
       display:       flex;
       align-items:   center;
-      gap:           10px;
-      margin-bottom: 20px;
+      gap:           var(--dev-space-4);
+      margin-bottom: var(--dev-space-5);
 
       h1 {
         margin-bottom: 0;
@@ -256,7 +256,7 @@ export default {
 
     &__label {
       display:        block;
-      margin-bottom:  4px;
+      margin-bottom:  var(--dev-space-2);
       color:          var(--muted);
       font-size:      12px;
       letter-spacing: 0.05em;
@@ -268,7 +268,7 @@ export default {
     &__sql {
       display:       block;
       width:         100%;
-      padding:       8px 10px;
+      padding:       var(--dev-space-3) var(--dev-space-4);
       border:        1px solid var(--border);
       border-radius: var(--border-radius);
       background:    var(--body-bg);
@@ -281,8 +281,8 @@ export default {
     &__tables {
       display:   flex;
       flex-wrap: wrap;
-      gap:       8px;
-      margin:    12px 0;
+      gap:       var(--dev-space-3);
+      margin:    var(--dev-space-4) 0;
     }
 
     // A tab, not a button: quiet until it is the current one, which is the only state worth
@@ -290,9 +290,9 @@ export default {
     &__table {
       display:       flex;
       align-items:   center;
-      gap:           6px;
+      gap:           var(--dev-space-3);
       min-height:    0;
-      padding:       4px 10px;
+      padding:       var(--dev-space-2) var(--dev-space-4);
       border:        1px solid var(--border);
       border-radius: var(--border-radius);
       background:    transparent;
@@ -323,15 +323,15 @@ export default {
 
     &__note {
       max-width:  100ch;
-      margin-top: 20px;
+      margin-top: var(--dev-space-5);
       color:      var(--muted);
       font-size:  12px;
 
       code {
         display:     block;
         overflow-x:  auto;
-        margin:      6px 0;
-        padding:     8px 10px;
+        margin:      var(--dev-space-3) 0;
+        padding:     var(--dev-space-3) var(--dev-space-4);
         border:      1px solid var(--border);
         border-radius: var(--border-radius);
         font-size:   11px;

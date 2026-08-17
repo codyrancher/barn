@@ -209,19 +209,19 @@ export default {
     // router-view the whole pane so that a terminal and a browser frame can fill it. A form is
     // not one of those, so it puts its own back, the same 20px the other pages use.
     overflow-y: auto;
-    padding:    20px;
+    padding:    var(--dev-space-5);
     max-width:  760px;
 
     header {
       display:       block;
-      margin-bottom: 20px;
+      margin-bottom: var(--dev-space-5);
 
       h1 {
         margin-bottom: 0;
       }
 
       .subheader {
-        margin: 4px 0 0 0;
+        margin: var(--dev-space-2) 0 0 0;
         color:  var(--muted);
       }
     }
@@ -231,8 +231,8 @@ export default {
     &__form {
       display:               grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap:                   20px;
-      margin-bottom:         20px;
+      gap:                   var(--dev-space-5);
+      margin-bottom:         var(--dev-space-5);
     }
 
     &__description {
@@ -242,9 +242,9 @@ export default {
 
     &__actions {
       display:         flex;
-      gap:             10px;
+      gap:             var(--dev-space-4);
       justify-content: flex-end;
-      margin-top:      20px;
+      margin-top:      var(--dev-space-5);
     }
   }
 </style>

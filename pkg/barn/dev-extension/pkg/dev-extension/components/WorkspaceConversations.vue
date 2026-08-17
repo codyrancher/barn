@@ -280,7 +280,7 @@ export default {
 
     &__note {
       max-width:     80ch;
-      margin-bottom: 10px;
+      margin-bottom: var(--dev-space-4);
       color:         var(--muted);
     }
 
@@ -289,7 +289,7 @@ export default {
     // because this is a status, not a log viewer: the terminal is the log viewer.
     &__log {
       overflow:      hidden;
-      margin:        6px 0 0 0;
+      margin:        var(--dev-space-3) 0 0 0;
       font-family:   monospace;
       font-size:     12px;
       white-space:   nowrap;

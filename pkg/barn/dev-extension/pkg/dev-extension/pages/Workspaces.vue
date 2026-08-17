@@ -289,8 +289,8 @@ export default {
     header {
       display:        flex;
       align-items:    flex-start;
-      gap:            20px;
-      margin-bottom:  20px;
+      gap:            var(--dev-space-5);
+      margin-bottom:  var(--dev-space-5);
 
       h1 {
         margin-bottom: 0;
@@ -298,7 +298,7 @@ export default {
 
       .subheader {
         max-width: 80ch;
-        margin:    4px 0 0 0;
+        margin:    var(--dev-space-2) 0 0 0;
         color:     var(--muted);
       }
 
@@ -310,7 +310,7 @@ export default {
 
     &__actions {
       display:         flex;
-      gap:             6px;
+      gap:             var(--dev-space-3);
       justify-content: flex-end;
     }
   }

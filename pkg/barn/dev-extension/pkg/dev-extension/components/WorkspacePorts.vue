@@ -502,14 +502,14 @@ export default {
     // whose content is one rectangle, the terminal and the browser frame, can fill it. A table is
     // not one of those, so it puts its own back, the same 20px the Sidecars tab uses.
     overflow-y: auto;
-    padding:    20px;
+    padding:    var(--dev-space-5);
 
     &__port {
       font-family: monospace;
     }
 
     &__loopback {
-      margin-left: 6px;
+      margin-left: var(--dev-space-3);
       color:       var(--warning);
       font-size:   11px;
     }
@@ -541,7 +541,7 @@ export default {
     &__actions {
       display:         flex;
       align-items:     center;
-      gap:             6px;
+      gap:             var(--dev-space-3);
       justify-content: flex-end;
     }
 

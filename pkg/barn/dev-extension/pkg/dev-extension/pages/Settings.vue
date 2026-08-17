@@ -488,11 +488,11 @@ export default {
 
 <style lang="scss" scoped>
   .dev-settings {
-    padding:   20px;
+    padding:   var(--dev-space-5);
     overflow-y: auto;
 
     header {
-      margin-bottom: 20px;
+      margin-bottom: var(--dev-space-5);
 
       h1 {
         margin-bottom: 0;
@@ -501,17 +501,17 @@ export default {
 
     .subheader {
       max-width: 90ch;
-      margin:    4px 0 10px 0;
+      margin:    var(--dev-space-2) 0 var(--dev-space-4) 0;
       color:     var(--muted);
     }
 
     &__section {
-      margin-top: 30px;
+      margin-top: var(--dev-space-6);
       max-width:  90ch;
     }
 
     &__field {
-      margin-top: 20px;
+      margin-top: var(--dev-space-5);
     }
 
     // The key, its state and its controls on one line under the field, so the field itself is
@@ -519,13 +519,13 @@ export default {
     &__row {
       display:     flex;
       align-items: center;
-      gap:         10px;
-      margin-top:  4px;
+      gap:         var(--dev-space-4);
+      margin-top:  var(--dev-space-2);
       font-size:   12px;
     }
 
     &__help {
-      margin:    4px 0 0 0;
+      margin:    var(--dev-space-2) 0 0 0;
       color:     var(--muted);
       font-size: 12px;
     }
@@ -555,15 +555,15 @@ export default {
     // The card, which is the harness's: a mark, a name, a line, and a summary that opens it.
     &__card {
       max-width:     720px;
-      margin-bottom: 20px;
-      padding:       16px;
+      margin-bottom: var(--dev-space-5);
+      padding:       var(--dev-space-5);
       border:        1px solid var(--border);
       border-radius: var(--border-radius);
     }
 
     &__card-head {
       display:     flex;
-      gap:         12px;
+      gap:         var(--dev-space-4);
       align-items: flex-start;
     }
 
@@ -584,7 +584,7 @@ export default {
       }
 
       p {
-        margin: 2px 0 0 0;
+        margin: var(--dev-space-1) 0 0 0;
         color:  var(--muted);
       }
     }
@@ -599,11 +599,11 @@ export default {
     &__summary {
       display:       flex;
       align-items:   center;
-      gap:           8px;
+      gap:           var(--dev-space-3);
       width:         100%;
       min-height:    0;
-      margin:        12px 0 0 0;
-      padding:       8px 10px;
+      margin:        var(--dev-space-4) 0 0 0;
+      padding:       var(--dev-space-3) var(--dev-space-4);
       border:        1px solid var(--border);
       border-radius: var(--border-radius);
       background:    transparent;
@@ -619,14 +619,14 @@ export default {
 
     &__prompt-label {
       display:     block;
-      margin-top:  10px;
+      margin-top:  var(--dev-space-4);
       font-weight: 600;
     }
 
     &__prompt {
       display:       block;
       width:         100%;
-      padding:       8px 10px;
+      padding:       var(--dev-space-3) var(--dev-space-4);
       border:        1px solid var(--border);
       border-radius: var(--border-radius);
       background:    var(--body-bg);
@@ -638,7 +638,7 @@ export default {
 
     &__actions {
       display:    flex;
-      margin-top: 20px;
+      margin-top: var(--dev-space-5);
     }
   }
 </style>

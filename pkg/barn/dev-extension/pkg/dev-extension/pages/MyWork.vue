@@ -847,13 +847,13 @@ export default {
 <style lang="scss" scoped>
   .dev-my-work {
     overflow-y: auto;
-    padding:    20px;
+    padding:    var(--dev-space-5);
 
     header {
       display:       flex;
       align-items:   center;
-      gap:           10px;
-      margin-bottom: 20px;
+      gap:           var(--dev-space-4);
+      margin-bottom: var(--dev-space-5);
 
       h1 {
         margin-bottom: 0;
@@ -867,13 +867,13 @@ export default {
     }
 
     h3 {
-      margin: 20px 0 8px 0;
+      margin: var(--dev-space-5) 0 var(--dev-space-3) 0;
     }
 
     // The row count beside a heading, which is the harness's, and quiet because it is a count
     // rather than part of the heading.
     &__count {
-      margin-left: 6px;
+      margin-left: var(--dev-space-3);
       color:       var(--muted);
       font-size:   12px;
       font-weight: 400;
@@ -889,13 +889,13 @@ export default {
     &__ci {
       display:     flex;
       align-items: center;
-      gap:         6px;
+      gap:         var(--dev-space-3);
     }
 
     // The harness's own pill, in Rancher's colours. Not BadgeState, which takes a Rancher state
     // name and would have to be told that "4 failing" is one.
     &__badge {
-      padding:       1px 6px;
+      padding:       1px var(--dev-space-3);
       border-radius: 10px;
       font-size:     11px;
       white-space:   nowrap;
@@ -923,8 +923,8 @@ export default {
     // A label, as a chip. Several to a cell and they wrap, because an issue can carry four.
     &__area {
       display:       inline-block;
-      margin:        1px 4px 1px 0;
-      padding:       1px 6px;
+      margin:        1px var(--dev-space-2) 1px 0;
+      padding:       1px var(--dev-space-3);
       border:        1px solid var(--border);
       border-radius: 10px;
       color:         var(--muted);
@@ -941,7 +941,7 @@ export default {
     }
 
     &__link {
-      margin-left: 8px;
+      margin-left: var(--dev-space-3);
       font-size:   12px;
       font-weight: 400;
     }
@@ -949,7 +949,7 @@ export default {
     &__error {
       display:     flex;
       align-items: center;
-      gap:         10px;
+      gap:         var(--dev-space-4);
     }
   }
 </style>

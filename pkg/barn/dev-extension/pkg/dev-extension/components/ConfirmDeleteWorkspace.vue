@@ -84,7 +84,7 @@ export default {
 <style lang="scss" scoped>
   .dev-confirm__actions {
     display:         flex;
-    gap:             10px;
+    gap:             var(--dev-space-4);
     justify-content: flex-end;
     width:           100%;
   }

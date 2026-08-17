@@ -15,6 +15,8 @@ import {
 import { showTerminal } from '../terminals';
 import { TEMPLATES } from '../templates';
 import DevList from './DevList.vue';
+import Stack from '../design/Stack.vue';
+import Row from '../design/Row.vue';
 import {
   DEV_PRODUCT, BLANK_CLUSTER, WORKSPACE_ROUTE, CREATE_ROUTE, WORKSPACES_ROUTE,
   MY_WORK_ROUTE, INSIGHTS_ROUTE, SETTINGS_ROUTE
@@ -40,7 +42,7 @@ let cached = [];
 export default {
   name: 'DevSidebar',
 
-  components: { DevList },
+  components: { DevList, Stack, Row },
 
   data() {
     return {
@@ -310,22 +312,30 @@ export default {
       >
         <!-- What is left on it, as two bars, while the pointer is on the name. -->
         <template #popover>
-          <div class="dev-sidebar__meter">
-            <span class="dev-sidebar__meter-label">MEM</span>
-            <span class="dev-sidebar__meter-track"><span
-              class="dev-sidebar__meter-fill"
-              :style="{ width: bar(section.memoryFree, biggest.memory) }"
-            /></span>
-            <span class="dev-sidebar__meter-value">{{ readable(section.memoryFree) }}</span>
-          </div>
-          <div class="dev-sidebar__meter">
-            <span class="dev-sidebar__meter-label">DISK</span>
-            <span class="dev-sidebar__meter-track"><span
-              class="dev-sidebar__meter-fill"
-              :style="{ width: bar(section.diskFree, biggest.disk) }"
-            /></span>
-            <span class="dev-sidebar__meter-value">{{ readable(section.diskFree) }}</span>
-          </div>
+          <Stack gap="2">
+            <Row
+              class="dev-sidebar__meter"
+              gap="3"
+            >
+              <span class="dev-sidebar__meter-label">MEM</span>
+              <span class="dev-sidebar__meter-track"><span
+                class="dev-sidebar__meter-fill"
+                :style="{ width: bar(section.memoryFree, biggest.memory) }"
+              /></span>
+              <span class="dev-sidebar__meter-value">{{ readable(section.memoryFree) }}</span>
+            </Row>
+            <Row
+              class="dev-sidebar__meter"
+              gap="3"
+            >
+              <span class="dev-sidebar__meter-label">DISK</span>
+              <span class="dev-sidebar__meter-track"><span
+                class="dev-sidebar__meter-fill"
+                :style="{ width: bar(section.diskFree, biggest.disk) }"
+              /></span>
+              <span class="dev-sidebar__meter-value">{{ readable(section.diskFree) }}</span>
+            </Row>
+          </Stack>
         </template>
         </DevList>
       </div>
@@ -398,7 +408,9 @@ export default {
 <style lang="scss" scoped>
   // Rancher's own step, the same one DevList's metrics come from.
   $rail: 16px;
-  $gap: 8px;
+  // The scale, not a number of this file's own: this was 8px and the list beside it was 8px
+  // for the same reason, which is what a scale is for.
+  $gap: var(--dev-space-3);
 
   .dev-sidebar {
     display:        flex;
@@ -458,16 +470,6 @@ export default {
     }
 
     // The two bars in a cluster's popover: a label, a track, and the number, on one line each.
-    &__meter {
-      display:       flex;
-      align-items:   center;
-      gap:           8px;
-      margin-bottom: 4px;
-
-      &:last-child {
-        margin-bottom: 0;
-      }
-    }
 
     &__meter-label {
       flex:        0 0 34px;

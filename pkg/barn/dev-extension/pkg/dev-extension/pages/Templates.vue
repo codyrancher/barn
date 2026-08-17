@@ -105,7 +105,7 @@ export default {
   .dev-templates {
     header {
       display:       block;
-      margin-bottom: 20px;
+      margin-bottom: var(--dev-space-5);
 
       h1 {
         margin-bottom: 0;
@@ -113,7 +113,7 @@ export default {
 
       .subheader {
         max-width: 80ch;
-        margin:    4px 0 0 0;
+        margin:    var(--dev-space-2) 0 0 0;
         color:     var(--muted);
       }
     }

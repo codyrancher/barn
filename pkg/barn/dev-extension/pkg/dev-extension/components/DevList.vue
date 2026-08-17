@@ -257,7 +257,8 @@ export default {
 <style lang="scss" scoped>
   $row-height: 33px;
   $rail: 16px;      // the left inset, and the width of the icon slot
-  $gap: 8px;        // icon slot to label, and the right inset
+  // The scale, not a number of this file's own. See design/tokens.css.
+  $gap: var(--dev-space-3);
   $control: 22px;   // the right-hand control, the same box in both kinds of row
 
   .dev-list {
@@ -497,7 +498,7 @@ export default {
       // sidebar is a bar under the workspaces that scrolls nothing anybody wants.
       width:         max-content;
       max-width:     100%;
-      padding:       8px 10px;
+      padding:       var(--dev-space-3) var(--dev-space-4);
       border:        1px solid var(--border);
       border-radius: var(--border-radius);
       background:    var(--body-bg);

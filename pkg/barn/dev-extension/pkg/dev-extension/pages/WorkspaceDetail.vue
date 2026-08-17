@@ -25,6 +25,7 @@ import Loading from '@shell/components/Loading';
 import Tabbed from '@shell/components/Tabbed';
 import Tab from '@shell/components/Tabbed/Tab';
 import { Banner } from '@components/Banner';
+import Row from '../design/Row.vue';
 import { RcButton } from '@components/RcButton';
 import WorkspaceConversations from '../components/WorkspaceConversations.vue';
 import WorkspaceBrowser from '../components/WorkspaceBrowser.vue';
@@ -46,7 +47,7 @@ export default {
   name: 'DevWorkspaceDetail',
 
   components: {
-    Loading, Tabbed, Tab, Banner, RcButton,
+    Loading, Tabbed, Tab, Banner, RcButton, Row,
     WorkspaceConversations, WorkspaceBrowser, WorkspacePorts, WorkspaceSidecars
   },
 
@@ -288,17 +289,18 @@ export default {
     <Banner
       v-if="stopped"
       color="info"
-      class="dev-workspace__stopped"
     >
-      <span>This workspace is stopped, so there is nothing to talk to.</span>
-      <RcButton
-        variant="secondary"
-        size="small"
-        :disabled="busy"
-        @click="startFromTab"
-      >
-        Start it
-      </RcButton>
+      <Row gap="4">
+        <span>This workspace is stopped, so there is nothing to talk to.</span>
+        <RcButton
+          variant="secondary"
+          size="small"
+          :disabled="busy"
+          @click="startFromTab"
+        >
+          Start it
+        </RcButton>
+      </Row>
     </Banner>
 
     <Tabbed
@@ -371,18 +373,10 @@ export default {
     min-height:     0;
 
     &--message {
-      padding: 20px;
+      padding: var(--dev-space-5);
     }
 
     // The sentence and the button on one line, since the button is what the sentence is about.
-    &__stopped {
-      :deep(.banner__content) {
-        display:     flex;
-        align-items: center;
-        gap:         10px;
-      }
-    }
-
     &__tabs {
       display:        flex;
       flex-direction: column;

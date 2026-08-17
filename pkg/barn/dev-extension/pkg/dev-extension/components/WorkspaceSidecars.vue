@@ -821,20 +821,20 @@ export default {
 <style lang="scss" scoped>
   .workspace-sidecars {
     overflow-y: auto;
-    padding:    20px;
+    padding:    var(--dev-space-5);
     // Nothing here is meant to be scrolled sideways: the cards wrap, and the one thing wider
     // than the pane is a dialog that covers it anyway.
     overflow-x: hidden;
 
     &__group {
-      margin-top: 20px;
+      margin-top: var(--dev-space-5);
 
       &:first-of-type {
         margin-top: 0;
       }
 
       h4 {
-        margin:         0 0 8px 0;
+        margin:         0 0 var(--dev-space-3) 0;
         color:          var(--muted);
         font-size:      12px;
         letter-spacing: 0.05em;
@@ -851,14 +851,14 @@ export default {
     &__cards {
       display:               grid;
       grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-      gap:                   10px;
+      gap:                   var(--dev-space-4);
       max-width:             1000px;
     }
 
     &__title {
       display:     flex;
       align-items: center;
-      gap:         10px;
+      gap:         var(--dev-space-4);
 
       h5 {
         margin: 0;
@@ -892,15 +892,15 @@ export default {
     }
 
     &__auth {
-      margin-top:  10px;
-      padding-top: 10px;
+      margin-top:  var(--dev-space-4);
+      padding-top: var(--dev-space-4);
       border-top:  1px solid var(--border);
     }
 
     &__auth-row {
       display:     flex;
       align-items: center;
-      gap:         10px;
+      gap:         var(--dev-space-4);
     }
 
     &__auth-label {
@@ -914,20 +914,20 @@ export default {
     }
 
     &__auth-state {
-      margin-top: 5px;
+      margin-top: var(--dev-space-3);
       color:      var(--muted);
       font-size:  12px;
     }
 
     &__links {
       display: flex;
-      gap:     10px;
+      gap:     var(--dev-space-4);
     }
 
     &__actions {
       display:   flex;
-      gap:       10px;
-      margin-top: 10px;
+      gap:       var(--dev-space-4);
+      margin-top: var(--dev-space-4);
     }
 
     // The card's own corner controls: quiet, and the same box as each other.
@@ -991,8 +991,8 @@ export default {
       header {
         display:       flex;
         align-items:   center;
-        gap:           10px;
-        padding:       12px 16px;
+        gap:           var(--dev-space-4);
+        padding:       var(--dev-space-4) var(--dev-space-5);
         border-bottom: 1px solid var(--border);
 
         h3 {
@@ -1004,19 +1004,19 @@ export default {
       footer {
         display:         flex;
         justify-content: flex-end;
-        gap:             10px;
-        padding:         12px 16px;
+        gap:             var(--dev-space-4);
+        padding:         var(--dev-space-4) var(--dev-space-5);
         border-top:      1px solid var(--border);
       }
     }
 
     &__fields {
       overflow-y: auto;
-      padding:    16px;
+      padding:    var(--dev-space-5);
     }
 
     &__field {
-      margin-bottom: 20px;
+      margin-bottom: var(--dev-space-5);
 
       &:last-child {
         margin-bottom: 0;
@@ -1026,7 +1026,7 @@ export default {
     // The sentence under a field, which is the declaration's own description.
     &__help {
       max-width: 70ch;
-      margin:    6px 0 0 0;
+      margin:    var(--dev-space-3) 0 0 0;
       color:     var(--muted);
       font-size: 12px;
     }
@@ -1035,7 +1035,7 @@ export default {
       overflow:    auto;
       flex:        1 1 auto;
       margin:      0;
-      padding:     12px 16px;
+      padding:     var(--dev-space-4) var(--dev-space-5);
       background:  var(--body-bg);
       color:       var(--body-text);
       font-family: monospace;
@@ -1046,7 +1046,7 @@ export default {
     // under its own text rather than under the clock.
     &__log-line {
       display: flex;
-      gap:     10px;
+      gap:     var(--dev-space-4);
     }
 
     &__log-at {
