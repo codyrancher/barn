@@ -23,11 +23,11 @@ import { RcButton } from '@components/RcButton';
 import PublishStatus from '../components/PublishStatus.vue';
 import ExtensionFilesModal from '../components/ExtensionFilesModal.vue';
 import NewExtensionModal from '../components/NewExtensionModal.vue';
+import StartingExtensions from '../components/StartingExtensions.vue';
 import {
   ensureExtension, extensionReady, extensionUrl, extensionProxyPath, publishExtension,
   DEFAULT_EXTENSION
 } from '../extensions';
-import { EXTENSION_STARTING_ROUTE } from '../editor-product';
 
 // How close to an edge the divider can be dragged, in percent of the page.
 const MIN_SPLIT = 10;
@@ -69,7 +69,7 @@ export default {
   name: 'BarnEditor',
 
   components: {
-    RcIcon, RcButton, PodTerminal, ExtensionSelect, ExtensionFilesModal, NewExtensionModal, AsyncButton,
+    RcIcon, RcButton, PodTerminal, ExtensionSelect, ExtensionFilesModal, NewExtensionModal, StartingExtensions, AsyncButton,
     PublishStatus
   },
 
@@ -88,6 +88,9 @@ export default {
       // The name typed into the box that does not exist yet, held while the modal asks what it
       // should be a copy of.
       creating:  '',
+      // Extensions that have been asked for and are coming up. A list rather than one, because
+      // nothing here stops you asking for a second while the first is still installing.
+      starting:  [],
       // What the right pane is showing, as a path inside the framed dashboard. Kept in sync
       // with the iframe by a poll rather than by its load event, because the thing in there is
       // a single-page app: it changes its URL with pushState and never loads again.
@@ -268,6 +271,20 @@ export default {
       } catch { /* mid-navigation, or not framed yet */ }
     },
 
+    /**
+     * Back and forward inside the framed dashboard.
+     *
+     * Its own history rather than the browser's: the pane is same-origin, so this is the
+     * ordinary History API on the frame's window. Using the outer browser's would take the
+     * whole editor back instead, which is the opposite of what a button next to that address
+     * should do.
+     */
+    history(delta) {
+      try {
+        this.$refs.frame?.contentWindow?.history?.go(delta);
+      } catch { /* mid-navigation */ }
+    },
+
     /** Go where the box says. A path, so what is typed reads like a Rancher URL. */
     go() {
       const path = this.address.startsWith('/') ? this.address : `/${ this.address }`;
@@ -319,15 +336,26 @@ export default {
       this.creating = name;
     },
 
+    /**
+     * Make it, and stay here.
+     *
+     * The wait goes on the strip under the actions rather than on a page of its own. Three to
+     * ten minutes is a long time to be sent away from the extension you were working on, and
+     * that extension goes on working the whole time.
+     */
     async onCreate({ name, source, done }) {
+      this.creating = '';
+
+      if (!this.starting.includes(name)) {
+        this.starting = [...this.starting, name];
+      }
+
       try {
         await ensureExtension(name, source);
         done(true);
-        this.creating = '';
-        this.$router.push({ name: EXTENSION_STARTING_ROUTE, params: { extension: name } });
       } catch (e) {
         done(false);
-        this.creating = '';
+        this.starting = this.starting.filter((each) => each !== name);
         this.publishError = e.message || String(e);
       }
     },
@@ -398,6 +426,12 @@ export default {
     </div>
 
 
+    <StartingExtensions
+      :names="starting"
+      @open="openExtension"
+      @dismiss="starting = starting.filter((each) => each !== $event)"
+    />
+
     <div
       ref="panes"
       class="mc-editor__panes"
@@ -433,6 +467,26 @@ export default {
           mostly off the end.
         -->
         <div class="mc-editor__addressbar">
+          <button
+            type="button"
+            class="mc-editor__nav"
+            title="Back"
+            aria-label="Back"
+            :disabled="!rightUrl"
+            @click="history(-1)"
+          >
+            <i class="icon icon-chevron-left" />
+          </button>
+          <button
+            type="button"
+            class="mc-editor__nav"
+            title="Forward"
+            aria-label="Forward"
+            :disabled="!rightUrl"
+            @click="history(1)"
+          >
+            <i class="icon icon-chevron-right" />
+          </button>
           <input
             ref="address"
             v-model="address"
@@ -608,8 +662,25 @@ $control-height: 30px;
     }
 
     :deep(.vs__actions) {
-      padding: 0 6px;
+      padding: 0 8px 0 4px;
     }
+
+  }
+
+  // The chevron is not the `.vs__open-indicator` svg - the shell hides that and draws its own in
+  // the icon font on `.vs__actions::after`, 32px tall with 8px of padding above it and a 2px
+  // upward nudge, all of which was for the padded row this no longer has.
+  //
+  // The selector carries `.no-label.compact-input` because the shell's does, and its rule has
+  // one more class than the version of this that only said `.labeled-select` - which is why
+  // that version changed the size and left the offset exactly where it was.
+  &__bar-select.labeled-select.no-label.compact-input :deep(.vs__actions)::after {
+    height:      auto;
+    padding-top: 0;
+    margin:      0;
+    font-size:   18px;
+    line-height: 1;
+    top:         0;
   }
 
   // The right-hand side is a column: the address, then the frame. Not a row above the panes,
@@ -622,9 +693,40 @@ $control-height: 30px;
     flex-direction: column;
   }
 
+  // The address and the two buttons in front of it are one recessed strip: same background,
+  // same bottom border, no gaps, so it reads as the top edge of the pane rather than as three
+  // controls that happen to be next to each other.
   &__addressbar {
-    flex:    0 0 auto;
-    padding: 0;
+    flex:          0 0 auto;
+    display:       flex;
+    align-items:   stretch;
+    height:        26px;
+    background:    var(--body-bg, #fff);
+    border-bottom: 1px solid var(--border, #dcdee7);
+    box-shadow:    inset 0 1px 2px rgba(0, 0, 0, 0.08);
+  }
+
+  &__nav {
+    flex:            0 0 auto;
+    width:           26px;
+    display:         inline-flex;
+    align-items:     center;
+    justify-content: center;
+    padding:         0;
+    border:          none;
+    background:      none;
+    color:           var(--link);
+    cursor:          pointer;
+    line-height:     0;
+
+    &:hover:not(:disabled) {
+      background: var(--accent-btn);
+    }
+
+    &:disabled {
+      color:  var(--muted);
+      cursor: default;
+    }
   }
 
   &__frame {
@@ -659,25 +761,21 @@ $control-height: 30px;
     }
   }
 
+  // Square and edge to edge, and carrying none of the strip's own chrome: the strip draws the
+  // border and the inset, this is just where the text goes.
   &__address {
-    display:     block;
-    width:       100%;
-    height:      26px;
-    padding:     0 10px;
-    // Square and edge to edge: it is the top of the pane below it rather than a control sitting
-    // over it, and a rounded box with air around it read as the latter.
+    flex:          1 1 auto;
+    min-width:     0;
+    padding:       0 8px;
     border:        none;
     border-radius: 0;
-    border-bottom: 1px solid var(--border, #dcdee7);
-    background:    var(--body-bg, #fff);
+    background:    none;
     color:         var(--body-text);
     font-family:   monospace;
     font-size:     12px;
-    box-shadow:    inset 0 1px 2px rgba(0, 0, 0, 0.08);
 
     &:focus {
-      outline:       none;
-      border-bottom: 1px solid var(--primary);
+      outline: none;
     }
 
     &:disabled {
