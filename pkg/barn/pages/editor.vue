@@ -112,6 +112,18 @@ export default {
     extension() {
       return this.$route.params.extension || DEFAULT_EXTENSION;
     },
+
+    /**
+     * What the pop-out opens: where the pane is now, not where it started.
+     *
+     * Built from the address rather than from `rightUrl`, so somebody who has navigated three
+     * pages into the framed dashboard gets those three pages rather than its front door.
+     */
+    popoutUrl() {
+      const path = this.address.startsWith('/') ? this.address : `/${ this.address }`;
+
+      return this.rightUrl ? `${ extensionProxyPath(this.extension) }${ path }` : '';
+    },
   },
 
   watch: {
@@ -347,17 +359,17 @@ export default {
       </div>
       <div class="mc-editor__bar-gap" />
       <div class="mc-editor__bar mc-editor__bar--right">
-        <input
-          ref="address"
-          v-model="address"
-          class="mc-editor__address"
-          spellcheck="false"
-          aria-label="Address of the framed dashboard"
-          :disabled="!rightUrl"
-          @focus="addressFocused = true"
-          @blur="addressFocused = false"
-          @keydown.enter="go"
+        <a
+          class="mc-editor__popout"
+          :class="{ 'mc-editor__popout--disabled': !rightUrl }"
+          :href="popoutUrl"
+          target="_blank"
+          rel="noopener"
+          title="Open this page on its own"
+          aria-label="Open this page on its own"
         >
+          <i class="icon icon-external-link" />
+        </a>
         <PublishStatus
           :stage="publishStage"
           :total="publishTotal"
@@ -384,6 +396,8 @@ export default {
         />
       </div>
     </div>
+
+
     <div
       ref="panes"
       class="mc-editor__panes"
@@ -412,27 +426,47 @@ export default {
       >
         <span class="mc-editor__grip" />
       </div>
-      <iframe
-        v-if="rightUrl"
-        ref="frame"
-        class="mc-editor__pane mc-editor__pane--right"
-        :src="rightUrl"
-        :title="extension"
-        @load="readAddress"
-      />
-      <div
-        v-else
-        class="mc-editor__pane mc-editor__pane--right mc-editor__waiting"
-      >
-        <RcIcon
-          type="spinner"
-          size="large"
-          class="icon-spin"
+      <div class="mc-editor__right">
+        <!--
+          The address, over the pane it is about. Nothing else on the action bar is about that
+          pane, and at the width a bar shared with three controls left it, a Rancher path was
+          mostly off the end.
+        -->
+        <div class="mc-editor__addressbar">
+          <input
+            ref="address"
+            v-model="address"
+            class="mc-editor__address"
+            spellcheck="false"
+            aria-label="Address of the framed dashboard"
+            :disabled="!rightUrl"
+            @focus="addressFocused = true"
+            @blur="addressFocused = false"
+            @keydown.enter="go"
+          >
+        </div>
+        <iframe
+          v-if="rightUrl"
+          ref="frame"
+          class="mc-editor__frame"
+          :src="rightUrl"
+          :title="extension"
+          @load="readAddress"
         />
-        <span>Starting the dev server for {{ extension }}</span>
-        <span class="mc-editor__waiting-note">
-          A first boot installs and compiles, which takes a few minutes.
-        </span>
+        <div
+          v-else
+          class="mc-editor__frame mc-editor__waiting"
+        >
+          <RcIcon
+            type="spinner"
+            size="large"
+            class="icon-spin"
+          />
+          <span>Starting the dev server for {{ extension }}</span>
+          <span class="mc-editor__waiting-note">
+            A first boot installs and compiles, which takes a few minutes.
+          </span>
+        </div>
       </div>
     </div>
 
@@ -453,6 +487,8 @@ export default {
 
 <style lang="scss" scoped>
 $divider-width: 8px;
+// Every control on the action bar is this tall.
+$control-height: 30px;
 
 .mc-editor {
   display: flex;
@@ -527,34 +563,122 @@ $divider-width: 8px;
     flex: 0 0 auto;
   }
 
-  // Both buttons the height of the box they sit beside. The shell's small button is 24px and
-  // its default is 30, and neither of those is 32, so this is said once here rather than
-  // fought for through size props that do not have that number in them.
-  &__bar button {
-    height:     32px;
-    min-height: 32px;
+  // One height for everything on the bar, said once. None of the shell's size props is this
+  // number - small is 24 and the default is 30 - and a bar whose controls are three different
+  // heights is what it looked like while each of them was left to its own.
+  &__bar button,
+  &__bar a,
+  &__bar :deep(.vs__dropdown-toggle) {
+    height:     $control-height;
+    min-height: $control-height;
   }
 
-  // And the box's own dead space. LabeledSelect keeps a container above the input for a label
-  // even when there is no label, which made the select 9px taller than the thing you can
-  // click on it and the bar taller than any of its contents.
-  &__bar-select :deep(.labeled-container) {
-    display: none;
+  // `.labeled-select` is on the same element and is deliberately part of the selector: the
+  // shell sets the padding below through a rule of its own with two classes in it, so a
+  // two-class selector here is a tie that its stylesheet wins by loading later. Three classes
+  // settles it without an !important that the next person has to argue with.
+  &__bar-select.labeled-select {
+    // A container above the input for a label there isn't, which made the select taller than
+    // the part of it you can click.
+    :deep(.labeled-container) {
+      display: none;
+    }
+
+    :deep(.vs__dropdown-toggle) {
+      display:     flex;
+      align-items: center;
+      padding:     0;
+    }
+
+    // The reason the text sat above centre: 8px of padding above it, 7 below, and a -5px
+    // margin pulling the whole row up inside a box we had given a fixed height.
+    :deep(.vs__selected-options) {
+      padding:     0 0 0 8px;
+      margin:      0;
+      align-items: center;
+      min-height:  0;
+      flex-wrap:   nowrap;
+    }
+
+    :deep(.vs__selected),
+    :deep(.vs__search) {
+      margin:   0;
+      padding:  0;
+      position: static;
+    }
+
+    :deep(.vs__actions) {
+      padding: 0 6px;
+    }
   }
 
-  // The address takes what the controls after it do not, so the bar reads left to right as
-  // where you are, then what is happening, then what you can do about it.
+  // The right-hand side is a column: the address, then the frame. Not a row above the panes,
+  // which is where this started and which pushed the terminal and the divider down by its own
+  // height so that neither reached the action bar.
+  &__right {
+    flex:           1 1 0;
+    min-width:      0;
+    display:        flex;
+    flex-direction: column;
+  }
+
+  &__addressbar {
+    flex:    0 0 auto;
+    padding: 0;
+  }
+
+  &__frame {
+    flex:      1 1 auto;
+    min-height: 0;
+    width:     100%;
+    border:    none;
+  }
+
+  &__popout {
+    display:         inline-flex;
+    align-items:     center;
+    justify-content: center;
+    flex:            0 0 auto;
+    // Square, and the height of everything else on the bar.
+    width:           $control-height;
+    // Everything after it is pushed to the far end, so the bar reads as: this pane, then what
+    // is happening to it, then what you can do.
+    margin-right:    auto;
+    border:          1px solid var(--border, #dcdee7);
+    border-radius:   var(--border-radius);
+    color:           var(--link);
+
+    &:hover {
+      background:   var(--accent-btn);
+      border-color: var(--primary);
+    }
+
+    &--disabled {
+      pointer-events: none;
+      opacity:        0.5;
+    }
+  }
+
   &__address {
-    flex:          1 1 auto;
-    min-width:     0;
-    height:        32px;
-    padding:       0 8px;
-    border:        1px solid var(--border, #dcdee7);
-    border-radius: var(--border-radius);
+    display:     block;
+    width:       100%;
+    height:      26px;
+    padding:     0 10px;
+    // Square and edge to edge: it is the top of the pane below it rather than a control sitting
+    // over it, and a rounded box with air around it read as the latter.
+    border:        none;
+    border-radius: 0;
+    border-bottom: 1px solid var(--border, #dcdee7);
     background:    var(--body-bg, #fff);
     color:         var(--body-text);
     font-family:   monospace;
     font-size:     12px;
+    box-shadow:    inset 0 1px 2px rgba(0, 0, 0, 0.08);
+
+    &:focus {
+      outline:       none;
+      border-bottom: 1px solid var(--primary);
+    }
 
     &:disabled {
       color: var(--muted);
@@ -563,6 +687,7 @@ $divider-width: 8px;
 
   &__bar-select {
     flex: 0 0 auto;
+
   }
 
   &__panes {
