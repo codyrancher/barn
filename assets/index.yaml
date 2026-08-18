@@ -12,6 +12,28 @@ entries:
       catalog.cattle.io/ui-component: plugins
       catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
     apiVersion: v2
+    appVersion: 0.5.17
+    created: "2026-08-18T16:47:37.213275594Z"
+    description: Provision and manage closet dev environments from Rancher
+    digest: 3a758e7cfb6198518242bd3753c9793022191501e0b20f5eefdd6f87ad35b5f0
+    home: https://github.com/codyrancher/barn
+    icon: https://rancher.github.io/ui-internal-tools/ai/magic-closet/logo.svg
+    name: barn
+    type: application
+    urls:
+    - assets/barn/barn-0.5.17.tgz
+    version: 0.5.17
+  - annotations:
+      catalog.cattle.io/certified: rancher
+      catalog.cattle.io/display-name: Barn
+      catalog.cattle.io/namespace: cattle-ui-plugin-system
+      catalog.cattle.io/os: linux
+      catalog.cattle.io/permits-os: linux, windows
+      catalog.cattle.io/rancher-version: '>= 2.10.0'
+      catalog.cattle.io/scope: management
+      catalog.cattle.io/ui-component: plugins
+      catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
+    apiVersion: v2
     appVersion: 0.5.16
     created: "2026-08-18T16:37:33.61988418Z"
     description: Provision and manage closet dev environments from Rancher
@@ -45,4 +67,4 @@ entries:
     urls:
     - assets/barn/barn-0.5.15.tgz
     version: 0.5.15
-generated: "2026-08-18T16:37:33.61880906Z"
+generated: "2026-08-18T16:47:37.212094795Z"
