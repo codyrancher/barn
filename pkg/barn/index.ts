@@ -1,7 +1,7 @@
 import { importTypes } from '@rancher/auto-import';
 import { IPlugin } from '@shell/core/types';
 import { ensureEditorContent } from './api';
-import { ensureDefaultExtension } from './extensions';
+import { ensureBrowser, ensureDefaultExtension } from './extensions';
 import { EDITOR_ROUTE, EXTENSION_STARTING_ROUTE } from './editor-product';
 
 // Init the package
@@ -29,6 +29,14 @@ export default function(plugin: IPlugin): void {
   // boot installs and compiles for a couple of minutes; the pod is only ready
   // once it can serve. Any others are made from the header's box, on demand.
   ensureDefaultExtension();
+
+  // And the browser those extensions are looked at in (see ensureBrowser): one
+  // Chromium for the namespace, with CDP open on its Service, so a claude in an
+  // extension pod can open the page it just changed and see what it did rather
+  // than describing what it should have done. Created the same way and for the
+  // same reason as the pod above - here rather than behind a toggle, so it is
+  // already warming up by the time anybody opens the editor.
+  ensureBrowser();
 
   // The editor itself: two panes under Rancher's own header.
   //

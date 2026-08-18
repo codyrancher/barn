@@ -63,6 +63,96 @@ The dashboard's own components are the best documentation available and they are
 `LabeledSelect`, `AsyncButton`, `Banner`, `AppModal` and `Card` cover most of what a page needs.
 The published docs are at <https://extensions.rancher.io/extensions/next/home>.
 
+## The browser you can look at it in
+
+Editing here is only half a loop. The other half is a Chromium in this namespace with its
+DevTools protocol open, so you can open the page you just changed and see what it did rather
+than describing what it should have done. One browser serves every extension in here, and
+somebody may be watching it, so leave it somewhere sensible and expect tabs you did not open.
+
+**Where to point it.** `https://$NODE_IP$DEV_PROXY_PATH/` - both are set on this pod.
+`DEV_PROXY_PATH` is the service-proxy path this dev server is reached at, and it is
+root-relative, which means nothing to something driving a browser from outside a page: it has
+to be made absolute. `NODE_IP` is what it is absolute against, and it is Rancher's address
+because this cluster is k3s inside the Rancher container - the node and Rancher are one
+address. Never write a hostname in yourself; those two are the whole URL.
+
+**Where the browser is, and the one trap in it.** `$BARN_BROWSER_SERVICE` names the Service
+(`barn-browser`) and `$BARN_BROWSER_CDP_PORT` its port. You have to resolve that name to an
+address yourself:
+
+```bash
+CDP="http://$(kubectl -n barn get svc "$BARN_BROWSER_SERVICE" -o jsonpath='{.spec.clusterIP}'):$BARN_BROWSER_CDP_PORT"
+```
+
+Chromium validates the `Host` header on the debugging port and answers anything that is not an
+IP or `localhost` with a 403, so `http://barn-browser:9222` fails and the ClusterIP works. This
+is also why there is no environment variable holding a ready-made CDP URL: one would look like
+an endpoint and behave like a bug. A pod older than the browser has neither variable; the
+Service is `barn-browser` on 9222 either way.
+
+### Getting past the login page
+
+A fresh profile has no Rancher session, so the first navigation lands on Rancher's login page
+rather than your dashboard. Rancher's session is a cookie whose value is an API token, so mint
+one from the endpoint the rest of this product uses:
+
+```bash
+curl -sk -X POST "https://$NODE_IP/v3-public/localProviders/local?action=login" \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"<the admin password>"}' | jq -r .token
+```
+
+That token is the whole value of the `R_SESS` cookie. Set it over CDP (`Network.setCookie`,
+domain `$NODE_IP`) before navigating, and the dashboard loads logged in.
+
+The password is the one thing this pod is not given. If you have not been told it, ask - do not
+guess, and do not go fishing for it in Secrets you happen to be able to read. The alternative
+that needs no password is to log in once by hand in the browser's own web UI: the session lives
+in the profile and lasts until that pod restarts, which is usually longer than the work.
+
+### Driving it
+
+Node 24 is what runs here and it has `fetch` and `WebSocket` built in, so this needs no install
+- which matters, because `yarn add` in this pod is slow and survives only as long as `/app`.
+
+```js
+const cdp = process.env.CDP;                       // resolved as above
+const url = `https://${ process.env.NODE_IP }${ process.env.DEV_PROXY_PATH }/`;
+
+// A tab of your own rather than the one somebody is looking at.
+const tab = await (await fetch(`${ cdp }/json/new?${ encodeURIComponent(url) }`, { method: 'PUT' })).json();
+
+// The websocket URL comes back with 127.0.0.1 in it, because that is the address Chromium
+// thinks it is on: it binds CDP to loopback and a forwarder in the pod republishes it. Point
+// it back at the address you reached it on or the connection is refused.
+const ws = new WebSocket(tab.webSocketDebuggerUrl.replace('ws://127.0.0.1:9222', cdp.replace('http://', 'ws://')));
+let id = 0;
+
+await new Promise((ok) => { ws.onopen = ok; });
+const send = (method, params = {}) => ws.send(JSON.stringify({ id: ++id, method, params }));
+
+// Console output and page errors are most of what you are looking for: a change that failed to
+// compile shows up here long before it shows up in a picture.
+ws.onmessage = (e) => console.log(e.data.slice(0, 400));
+send('Runtime.enable');
+send('Log.enable');
+```
+
+`Page.captureScreenshot` returns base64 PNG when you want a picture rather than a log. It works
+with nobody watching because a keepalive service in that pod holds the display open; without it
+the display collapses to 1x1 and the call hangs rather than failing, which is worth knowing if
+screenshots ever start timing out.
+
+Two things about this dev server in particular:
+
+- **A save is not instant.** The compile is a few seconds and the result is pushed to the page
+  over the hot-reload socket. Navigating immediately after a save shows you the old page or a
+  half-compiled one, so wait for the recompile rather than racing it.
+- **Hot reload needs the session too.** That socket rides the same proxy, so it works on every
+  page you are logged in for and not on the login page. A page that never updates is usually a
+  page that is not logged in.
+
 ## This tree is not the repo
 
 Nothing here is checked out from git and nothing syncs back. The repo copy lives in

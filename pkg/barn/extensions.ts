@@ -343,6 +343,19 @@ function deployment(name: string): Record<string, unknown> {
               // places is three chances to work it out differently.
               { name: 'EXTENSION_NAME', value: name },
               { name: 'NODE_ENV', value: 'dev' },
+              // Which Service the browser is, so a terminal in here does not have to be
+              // told. One browser serves every extension - see ensureBrowser. The name
+              // rather than a URL on purpose: Chromium rejects a CDP request whose Host
+              // header is not an IP, so this has to be resolved before it is used, and a
+              // variable that looked like a working endpoint would be worse than none.
+              { name: 'BARN_BROWSER_SERVICE', value: BROWSER_OBJECT },
+              { name: 'BARN_BROWSER_CDP_PORT', value: `${ BROWSER_CDP_PORT }` },
+              // Rancher's address from inside the cluster, which is the node's:
+              // this cluster is k3s inside the Rancher container. With
+              // DEV_PROXY_PATH above it is the whole absolute URL of this
+              // extension's own dashboard, which is what the browser has to be
+              // pointed at - a root-relative path means nothing to a driver.
+              { name: 'NODE_IP', valueFrom: { fieldRef: { fieldPath: 'status.hostIP' } } },
               // A dashboard build is big enough to OOM node's default heap.
               { name: 'NODE_OPTIONS', value: '--max_old_space_size=4096' },
             ],
@@ -524,6 +537,356 @@ export function ensureExtension(name: string, source = DEFAULT_SEED): Promise<vo
 /** The one every Rancher gets, created when this bundle loads. */
 export function ensureDefaultExtension(): Promise<void> {
   return ensureExtension(DEFAULT_EXTENSION);
+}
+
+// ---------------------------------------------------------------------------
+// The browser the editor looks at its own changes in.
+// ---------------------------------------------------------------------------
+
+/**
+ * One browser for the namespace, not one per extension.
+ *
+ * What it is for is claude in an extension pod being able to look at the page it
+ * just changed, and that wants a browser that is already logged in and already
+ * pointed somewhere rather than a fresh one per tree. It is also the most
+ * expensive thing in here - Chromium with a desktop around it - so a second one
+ * would be paid for again on every extension anybody creates.
+ */
+export const BROWSER_OBJECT = 'barn-browser';
+
+/**
+ * The image the closet's own browser sidecar runs, and the harness's Browser tab
+ * with it: Chromium plus a web UI in front of it, so the thing a person frames is
+ * a page rather than a screen protocol that would need a plugin.
+ */
+const BROWSER_IMAGE = 'lscr.io/linuxserver/chromium:latest';
+
+/**
+ * Its web UI, on the port CUSTOM_PORT tells it to serve. Plain http inside the
+ * cluster, because Rancher's proxy terminates the TLS a person's browser sees and
+ * would not talk to this image's self-signed certificate on the way through.
+ */
+const BROWSER_UI_PORT = 3000;
+
+/**
+ * Chromium's DevTools protocol, which is the half of this the workspace browser
+ * does not have.
+ *
+ * That one drops its CDP flags on purpose, because it is there for a person to
+ * look at. This one is driven: something opens a page, waits for the dev server
+ * to finish compiling, reads the console and takes a screenshot, and none of that
+ * is reachable through a web UI built for a mouse.
+ *
+ * It is bound to 0.0.0.0 and unauthenticated, which is worth saying plainly:
+ * anything that can reach this Service can drive this browser, and this browser
+ * holds a Rancher session. That is the same set of people who can already open a
+ * terminal in an extension pod - see EXT_ACCOUNT - so it widens what is reachable
+ * without widening who can reach it.
+ */
+const BROWSER_CDP_PORT = 9222;
+
+/**
+ * The ConfigMap holding the two s6 services the image runs alongside Chromium.
+ *
+ * Both are copies of the closet's own browser sidecar (`workspace/sidecars/dev/
+ * rancher-browser/`), which runs this same image outside Kubernetes and needed
+ * both for the same reasons. Copied rather than shared because an extension
+ * bundle cannot read the repo it was built from, and kept as whole files rather
+ * than command lines because each has an ordering in it.
+ */
+const BROWSER_SERVICES = 'barn-browser-services';
+
+/**
+ * Republishes CDP on the pod's own address.
+ *
+ * Headful Chromium binds its DevTools port to 127.0.0.1 and cannot be told not
+ * to, so without this the Service's port 9222 answers connection refused from
+ * everywhere except inside this container.
+ *
+ * The consequence for whoever drives it is the one thing to know about this
+ * browser: Chromium validates the Host header on that port and rejects anything
+ * that is not an IP or localhost, so `barn-browser:9222` gets a 403 while the
+ * Service's ClusterIP works. See the seeded CLAUDE.md, which says so where it
+ * will be read.
+ */
+const CDP_PROXY = String.raw`#!/usr/bin/with-contenv bash
+# s6 service (mounted into /custom-services.d/): exposes Chromium's CDP to the
+# compose network. Headful Chromium only binds 127.0.0.1:9222, so we forward
+# <container-ip>:9222 -> 127.0.0.1:9222. Connect using the IP, not the
+# service name — Chrome rejects non-localhost/non-IP Host headers.
+exec python3 - <<'PYEOF'
+import asyncio, socket
+
+def container_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect(('10.255.255.255', 1))  # no traffic sent; selects default-route iface
+    ip = s.getsockname()[0]
+    s.close()
+    return ip
+
+async def pipe(reader, writer):
+    try:
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                break
+            writer.write(data)
+            await writer.drain()
+    except Exception:
+        pass
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+async def handle(client_r, client_w):
+    try:
+        upstream_r, upstream_w = await asyncio.open_connection('127.0.0.1', 9222)
+    except Exception:
+        client_w.close()
+        return
+    await asyncio.gather(pipe(client_r, upstream_w), pipe(upstream_r, client_w))
+
+async def main():
+    ip = container_ip()
+    server = await asyncio.start_server(handle, ip, 9222)
+    print(f'cdp-proxy: {ip}:9222 -> 127.0.0.1:9222', flush=True)
+    async with server:
+        await server.serve_forever()
+
+asyncio.run(main())
+PYEOF
+`;
+
+/**
+ * Holds one display client connected so screenshots keep working.
+ *
+ * Selkies resizes the virtual display to 1x1 when the last viewer disconnects,
+ * and Page.captureScreenshot then hangs rather than failing. A browser that is
+ * driven rather than watched is in that state almost always, which is why this
+ * is here and not in the workspace browser: that one has a person in front of it.
+ */
+const STREAM_KEEPALIVE = String.raw`#!/usr/bin/with-contenv bash
+# s6 service: hold ONE Selkies display client connected at all times so the
+# virtual display never tears down to 1x1. Selkies resizes the display to 1x1
+# when the LAST viewer disconnects; once it's 1x1, Chromium's CDP
+# Page.captureScreenshot hangs forever (verified: it returns in ~50ms while a
+# client is held, and HANGs ~10s after the last client leaves).
+#
+# We deliberately do NOT send START_VIDEO: a connected client alone keeps the
+# display alive (verified across the teardown window), and streaming would just
+# encode+transmit frames nothing reads. We also don't pin manual-resolution mode,
+# so a real human viewer on :8303 connecting at their own size takes over cleanly.
+# (Holding a client does cost ~8% of one core in the Selkies capture loop — that's
+# inherent to this image whenever the display is held full-size for headless
+# screenshots, not the video stream.)
+exec python3 - <<'PYEOF'
+import asyncio, json
+import websockets
+
+URI = "ws://127.0.0.1:3000/websocket"
+# Minimal: assert a usable display size (so headless screenshots aren't 1x1),
+# but not manual-resolution mode — a human viewer's own size then wins.
+SETTINGS = "SETTINGS," + json.dumps({
+    "initialClientWidth": 1280, "initialClientHeight": 800, "displayId": "primary",
+})
+
+async def run():
+    delay = 1
+    while True:
+        try:
+            async with websockets.connect(URI, max_size=None, ping_interval=20, open_timeout=10) as ws:
+                await ws.send(SETTINGS)
+                await ws.send("r,1280x800,primary")
+                print("stream-keepalive: holding display (no video)", flush=True)
+                delay = 1  # reset backoff once a session is established
+                async for _ in ws:  # stay connected; drain any server messages
+                    pass
+        except Exception as e:
+            # Selkies not up yet (boot) or the connection dropped — back off so we
+            # don't churn/log-spam every 3s indefinitely if it never comes up.
+            print(f"stream-keepalive: reconnect in {delay}s ({e})", flush=True)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30)
+
+asyncio.run(run())
+PYEOF
+`;
+
+/** Where a person watches it: the same service proxy every other page here is on. */
+export function browserUrl(): string {
+  return `${ EXT_BASE }/api/v1/namespaces/${ EXT_NS }/services/http:${ BROWSER_OBJECT }:${ BROWSER_UI_PORT }/proxy/`;
+}
+
+function browserDeployment(): Record<string, unknown> {
+  return {
+    apiVersion: 'apps/v1',
+    kind:       'Deployment',
+    metadata:   { namespace: EXT_NS, name: BROWSER_OBJECT, labels: { app: BROWSER_OBJECT } },
+    spec:       {
+      replicas: 1,
+      selector: { matchLabels: { app: BROWSER_OBJECT } },
+      // Recreate rather than RollingUpdate: two Chromiums sharing one profile
+      // directory is a browser that will not start, and the second one wins the
+      // race often enough to look intermittent.
+      strategy: { type: 'Recreate' },
+      template: {
+        metadata: { labels: { app: BROWSER_OBJECT } },
+        spec:     {
+          containers: [{
+            name:  'browser',
+            image: BROWSER_IMAGE,
+            ports: [
+              { name: 'http', containerPort: BROWSER_UI_PORT },
+              { name: 'cdp', containerPort: BROWSER_CDP_PORT },
+            ],
+            env: [
+              // The image runs as this user and writes its profile as it. A
+              // root-owned profile in a container that then drops privileges is a
+              // browser that cannot start twice.
+              { name: 'PUID', value: '1000' },
+              { name: 'PGID', value: '1000' },
+              { name: 'CUSTOM_PORT', value: `${ BROWSER_UI_PORT }` },
+              { name: 'TITLE', value: 'Barn' },
+              // The node's address, which is the one thing in here nothing else
+              // knows: the kubelet telling the pod where it is running. This
+              // cluster is k3s inside the Rancher container, so the node and
+              // Rancher are the same address, and it is how a pod reaches Rancher
+              // without being told a hostname. Declared before CHROME_CLI because
+              // Kubernetes expands $(VAR) only against variables already listed.
+              { name: 'NODE_IP', valueFrom: { fieldRef: { fieldPath: 'status.hostIP' } } },
+              {
+                name: 'CHROME_CLI',
+                // What it opens on: the default extension's dev server, through
+                // the same service proxy a person would reach it at, on Rancher's
+                // own origin. It opens on Rancher's login page the first time,
+                // because a fresh profile has no session - see the CLAUDE.md in
+                // the seed for the log-in-then-navigate the driver does about it.
+                //
+                // --ignore-certificate-errors is the flag that is not cosmetic:
+                // Rancher serves its own certificate here and without this the
+                // browser opens on an interstitial instead of the page.
+                // --remote-allow-origins is the one that is easy to miss: recent
+                // Chromium refuses a CDP websocket whose Origin it does not know,
+                // which reads as a driver that connects and then hangs.
+                // The backgrounding flags are not cosmetic either: Chromium throttles a
+                // renderer nothing is looking at, and a driven browser is exactly that, so
+                // without them Page.captureScreenshot answers slowly or not at all.
+                //
+                // --remote-debugging-address is deliberately absent. Headful Chromium binds
+                // CDP to 127.0.0.1 whatever it is told, so that flag is a no-op that would
+                // only fight the forwarder below for the port if a future Chromium honoured
+                // it. The closet's own browser sidecar says the same thing at more length.
+                value: `https://$(NODE_IP)${ extensionUrl(DEFAULT_EXTENSION) } --no-first-run --start-maximized --disable-infobars --disable-session-crashed-bubble --hide-crash-restore-bubble --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --allow-insecure-localhost --ignore-certificate-errors --remote-debugging-port=${ BROWSER_CDP_PORT } --allow-running-insecure-content`,
+              },
+            ],
+            // A memory-backed /dev/shm rather than the 64MB a container gets by
+            // default. It is the pod's own memory, and Chromium is the one thing
+            // here that has ever needed it: below about this, a page with a
+            // dashboard in it crashes the tab rather than rendering slowly.
+            volumeMounts: [
+              { name: 'dshm', mountPath: '/dev/shm' },
+              // One mount per file with subPath, because each of these is a file the image
+              // runs, not a directory: /custom-services.d holds one executable per service.
+              { name: 'services', mountPath: '/custom-services.d/cdp-proxy', subPath: 'cdp-proxy', readOnly: true },
+              { name: 'services', mountPath: '/custom-services.d/stream-keepalive', subPath: 'stream-keepalive', readOnly: true },
+            ],
+            // Ready when CDP answers, not when the container starts. The web UI
+            // comes up before Chromium does, so probing the UI port would say
+            // ready to a driver that then gets connection refused.
+            readinessProbe: {
+              httpGet:       { path: '/json/version', port: BROWSER_CDP_PORT },
+              periodSeconds: 10,
+            },
+          }],
+          volumes: [
+            // A container gets 64MB of shared memory by default and Chromium's renderers pass
+            // their surfaces through it: the documented symptom of leaving it there is tabs
+            // dying as "Aw, Snap". Memory-backed, so it is the pod's own memory.
+            { name: 'dshm', emptyDir: { medium: 'Memory', sizeLimit: '1Gi' } },
+            // 0o555: the image execs these, so they have to arrive executable.
+            { name: 'services', configMap: { name: BROWSER_SERVICES, defaultMode: 0o555 } },
+          ],
+        },
+      },
+    },
+  };
+}
+
+let ensureBrowserInFlight: Promise<void> | null = null;
+
+/**
+ * Create the browser's Deployment and Service if they aren't there yet.
+ *
+ * Idempotent, deduped in flight and error-swallowing, for the same reasons
+ * ensureExtension is: it runs when the bundle loads, in front of a page, on
+ * behalf of somebody who may not be allowed to create any of it.
+ *
+ * Create-if-missing rather than upsert, because replacing the Deployment
+ * restarts the browser - which throws away the Rancher session in its profile
+ * and whatever page somebody was looking at.
+ */
+export function ensureBrowser(): Promise<void> {
+  if (ensureBrowserInFlight) {
+    return ensureBrowserInFlight;
+  }
+
+  ensureBrowserInFlight = (async() => {
+    await ensureShared();
+
+    // The s6 services (upsert, unlike the Deployment below): a fixed script that has been
+    // corrected reaches an existing cluster on the next load, and the pod reads them at
+    // boot, so the correction lands the next time it restarts rather than needing one.
+    const services = { 'cdp-proxy': CDP_PROXY, 'stream-keepalive': STREAM_KEEPALIVE };
+    const cm = await extGet('configmaps', BROWSER_SERVICES);
+
+    if (cm) {
+      await rancherFetch(`${ EXT_BASE }/v1/configmaps/${ EXT_NS }/${ BROWSER_SERVICES }`, {
+        method: 'PUT',
+        body:   JSON.stringify({ ...cm, data: services }),
+      }).catch(() => null);
+    } else {
+      await rancherFetch(`${ EXT_BASE }/v1/configmaps`, {
+        method: 'POST',
+        body:   JSON.stringify({
+          apiVersion: 'v1',
+          kind:       'ConfigMap',
+          metadata:   { namespace: EXT_NS, name: BROWSER_SERVICES, labels: { app: BROWSER_OBJECT } },
+          data:       services,
+        }),
+      }).catch(() => null);
+    }
+
+    if (!await extGet('apps.deployments', BROWSER_OBJECT)) {
+      await rancherFetch(`${ EXT_BASE }/v1/apps.deployments`, {
+        method: 'POST',
+        body:   JSON.stringify(browserDeployment()),
+      }).catch(() => null);
+    }
+
+    if (!await extGet('services', BROWSER_OBJECT)) {
+      await rancherFetch(`${ EXT_BASE }/v1/services`, {
+        method: 'POST',
+        body:   JSON.stringify({
+          apiVersion: 'v1',
+          kind:       'Service',
+          metadata:   { namespace: EXT_NS, name: BROWSER_OBJECT, labels: { app: BROWSER_OBJECT } },
+          spec:       {
+            selector: { app: BROWSER_OBJECT },
+            ports:    [
+              { name: 'http', port: BROWSER_UI_PORT, targetPort: 'http' },
+              { name: 'cdp', port: BROWSER_CDP_PORT, targetPort: 'cdp' },
+            ],
+          },
+        }),
+      }).catch(() => null);
+    }
+  })().finally(() => {
+    ensureBrowserInFlight = null;
+  });
+
+  return ensureBrowserInFlight;
 }
 
 /**
