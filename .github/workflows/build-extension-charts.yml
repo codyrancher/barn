@@ -31,6 +31,16 @@ on:
     types: [released]
   # And by hand, for the first run and for re-publishing a version that was built wrong.
   workflow_dispatch:
+  # And on the version changing on main, so that bumping the number is the whole of
+  # publishing. Pushing every commit is not an option: what this publishes is a Helm
+  # repository, a chart version is supposed to be immutable, and republishing 0.5.15 with
+  # different contents inside it is the drift the tagged path exists to prevent. So the
+  # trigger is the file that carries the number, and the job below refuses anyway if that
+  # number is already in the index.
+  push:
+    branches: [main]
+    paths:
+      - 'pkg/barn/package.json'
 
 defaults:
   run:
@@ -38,7 +48,37 @@ defaults:
     working-directory: ./
 
 jobs:
+  # Is this version already published? The path filter above fires on any edit to
+  # package.json, not only the version, so without this a change to something else in that
+  # file would republish the version already on gh-pages under the same number.
+  #
+  # The index on gh-pages is the authority rather than the tags, because it is what Rancher
+  # actually reads: a version missing from it is unpublished no matter what was tagged.
+  version-check:
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.decide.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: decide
+        run: |
+          version=$(node -p "require('./pkg/barn/package.json').version")
+          git fetch --depth=1 origin gh-pages 2>/dev/null || true
+          if git show origin/gh-pages:index.yaml > /tmp/index.yaml 2>/dev/null; then
+            if grep -qE "^[[:space:]]+version: ${version}$" /tmp/index.yaml; then
+              echo "barn ${version} is already on gh-pages - nothing to publish"
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "barn ${version} is not published yet"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
   build-extension-charts:
+    needs: version-check
+    # A release and a manual run say what they want outright; only the push trigger is
+    # guessing, and it is the one that has to be talked out of republishing.
+    if: github.event_name != 'push' || needs.version-check.outputs.publish == 'true'
     uses: rancher/dashboard/.github/workflows/build-extension-charts.yml@9bf23dff6650116673346447bcf0b088e0edb27f # creators-pkg-v3.0.12
     permissions:
       contents: write
