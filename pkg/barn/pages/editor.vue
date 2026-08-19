@@ -30,7 +30,7 @@ import PublishSplit from '../components/PublishSplit.vue';
 import StartingExtensions from '../components/StartingExtensions.vue';
 import {
   ensureExtension, extensionReady, extensionUrl, extensionProxyPath, publishExtension,
-  publishExtensionToGithub, DEFAULT_EXTENSION
+  publishExtensionToGithub, removeLocalInstall, DEFAULT_EXTENSION
 } from '../extensions';
 
 // How close to an edge the divider can be dragged, in percent of the page.
@@ -149,6 +149,7 @@ export default {
       return [
         { id: 'github', label: 'Publish to GitHub' },
         { id: 'import', label: 'Import from GitHub' },
+        { id: 'remove', label: 'Remove local install' },
       ];
     },
 
@@ -392,6 +393,12 @@ export default {
         return;
       }
 
+      if (id === 'remove') {
+        this.removeInstall();
+
+        return;
+      }
+
       if (id === 'github') {
         // Not published yet: where to is a question, and the modal asks it.
         this.publishingGithub = true;
@@ -438,6 +445,34 @@ export default {
         return false;
       } finally {
         this.publishStage = 0;
+        this.publishing = false;
+      }
+    },
+
+    /**
+     * Undo a local publish.
+     *
+     * Reported on the same strip as a publish, because it is the same question answered the
+     * other way: what this Rancher is currently loading. Nothing about the pod changes, so
+     * there is no progress to count - it is one delete.
+     */
+    async removeInstall() {
+      if (this.publishing) {
+        return;
+      }
+
+      this.publishing = true;
+      this.publishError = '';
+      this.published = '';
+      this.publishLog = '';
+
+      try {
+        const plugin = await removeLocalInstall(this.extension);
+
+        this.published = `${ plugin } removed from this Rancher`;
+      } catch (e) {
+        this.publishError = e.message || String(e);
+      } finally {
         this.publishing = false;
       }
     },
@@ -968,40 +1003,35 @@ $rancher-rail-width: 70px;
     border:    none;
   }
 
-  // One control with two halves rather than two buttons, so the pair reads as a switch between
-  // two views of the same pane. The border goes round the group and the divider is the seam
-  // between them; the current half is filled. Drawn only on the current one - which is what the
-  // first attempt did - left an unselected tab looking like plain text beside a button.
+  // Tabs the way Rancher draws them: the current one is named in the active colour and
+  // underlined, and there is no box around either. The first attempt made them a segmented
+  // control, which is a different thing - that says "pick a mode", and these say "this pane has
+  // two pages". Matched to @shell/components/Tabbed, which uses a 2px bottom border in
+  // --active for the same purpose.
   &__tabs {
-    display:       inline-flex;
-    flex:          0 0 auto;
-    border:        1px solid var(--border, #dcdee7);
-    border-radius: var(--border-radius);
-    overflow:      hidden;
+    display: inline-flex;
+    flex:    0 0 auto;
+    gap:     4px;
   }
 
   &__tab {
-    padding:       0 12px;
+    padding:       0 10px;
     background:    transparent;
     border:        none;
-    // The seam. On the left of each but the first, so the group's own border stays the outside.
-    border-left:   1px solid var(--border, #dcdee7);
+    // Reserved whether or not it is drawn, so selecting a tab does not move the text up.
+    border-bottom: 2px solid transparent;
     border-radius: 0;
     color:         var(--muted);
     font-size:     12px;
     cursor:        pointer;
-
-    &:first-child {
-      border-left: none;
-    }
 
     &:hover {
       color: var(--body-text);
     }
 
     &--current {
-      background: var(--accent-btn);
-      color:      var(--body-text);
+      color:               var(--active, var(--primary));
+      border-bottom-color: var(--active, var(--primary));
     }
   }
 

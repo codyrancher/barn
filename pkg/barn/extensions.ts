@@ -72,6 +72,24 @@ const EXT_BASE = `/k8s/clusters/${ EXT_CLUSTER }`;
 const EXT_ACCOUNT = 'barn-extension';
 const EXT_ROLE_BINDING = 'barn-extension-cluster-admin';
 
+/**
+ * What an extension was seeded from, remembered on its own ConfigMap.
+ *
+ * Because "make sure this exists" and "make this" are the same call, and only one of them
+ * knows the answer. The editor, the terminal and the starting page all call ensureExtension
+ * with a name and no source, meaning "it should be running" - and a default source turns that
+ * into "and it is a dev extension", which for anything made from another seed replaces its
+ * tree's seed with a different extension's.
+ *
+ * The symptom is indirect enough to be worth writing down: the pod ends up with two packages,
+ * the CLAUDE.md of the one it did not come from telling claude that is its source, and a
+ * publish that builds the other one. Edits land where nothing reads them.
+ *
+ * An annotation rather than a label because a source can be `github:owner/repo#branch`, which
+ * is not a legal label value.
+ */
+const SOURCE_ANNOTATION = 'barn.rancher.io/source';
+
 /** ConfigMap keys cannot contain '/', so paths are flattened and boot.sh rebuilds them. */
 export const PATH_SEPARATOR = '__';
 
@@ -559,6 +577,54 @@ async function ensureShared(): Promise<void> {
   }
 }
 
+/**
+ * The pod and the Service, without touching the seed.
+ *
+ * Split out because "make sure this is running" and "seed this" stopped being the same thing:
+ * a call that does not know what an extension was made from must still be able to start it.
+ */
+async function ensureRunning(name: string, object: string): Promise<void> {
+  // Deployment (node running the dev server over the seeded tree)
+  const existing = await extGet('apps.deployments', object);
+
+  if (!existing) {
+    await rancherFetch(`${ EXT_BASE }/v1/apps.deployments`, {
+      method: 'POST',
+      body:   JSON.stringify(deployment(name)),
+    }).catch(() => null);
+  } else if (existing.spec?.template?.spec?.serviceAccountName !== EXT_ACCOUNT) {
+    // The one thing an existing Deployment is brought up to date on.
+    //
+    // Everything else here is deliberately create-if-missing, because replacing a Deployment
+    // restarts a dev server somebody is editing in. This is the exception because a pod
+    // running as `default` has no rights at all, which is the difference between a terminal
+    // that can answer questions about the cluster and one that gets 403 to all of them - and
+    // no amount of granting fixes it, because the grant is to an account the pod is not using.
+    //
+    // It costs one restart, once. The tree and node_modules are on a hostPath, so the pod is
+    // back in seconds rather than reinstalling; what it does end is any tmux session in it.
+    existing.spec.template.spec.serviceAccountName = EXT_ACCOUNT;
+
+    await rancherFetch(`${ EXT_BASE }/v1/apps.deployments/${ EXT_NS }/${ object }`, {
+      method: 'PUT',
+      body:   JSON.stringify(existing),
+    }).catch(() => null);
+  }
+
+  // Service (ClusterIP :8005, what the service proxy above resolves to)
+  if (!await extGet('services', object)) {
+    await rancherFetch(`${ EXT_BASE }/v1/services`, {
+      method: 'POST',
+      body:   JSON.stringify({
+        apiVersion: 'v1',
+        kind:       'Service',
+        metadata:   { namespace: EXT_NS, name: object, labels: { app: object } },
+        spec:       { selector: { app: object }, ports: [{ name: 'http', port: EXT_PORT, targetPort: 'http' }] },
+      }),
+    }).catch(() => null);
+  }
+}
+
 // `| undefined` on purpose: an index signature without it types every lookup as a live promise,
 // so the guard below reads as always-true and `yarn build-pkg` refuses it (TS2801).
 const ensureInFlight: Record<string, Promise<void> | undefined> = {};
@@ -573,7 +639,7 @@ const ensureInFlight: Record<string, Promise<void> | undefined> = {};
  * Deployment and Service are create-if-missing, because replacing them would
  * restart a dev server somebody is editing in.
  */
-export function ensureExtension(name: string, source = DEFAULT_SEED): Promise<void> {
+export function ensureExtension(name: string, source?: string): Promise<void> {
   const inFlight = ensureInFlight[name];
 
   if (inFlight) {
@@ -589,27 +655,48 @@ export function ensureExtension(name: string, source = DEFAULT_SEED): Promise<vo
     // already have, so this adds new files to a running tree without touching
     // what has been edited in there.
     const cm = await extGet('configmaps', object);
+    const recorded = cm?.metadata?.annotations?.[SOURCE_ANNOTATION];
+    // What this extension is made of, in order of who actually knows: the caller if it was
+    // told, then what this extension was made from before, then the default - which is only
+    // ever right for something being created now.
+    const from = source || recorded || DEFAULT_SEED;
+
+    // A call with no source, against an extension that predates the annotation, is the one
+    // case with no answer. Leaving the seed alone is the safe half of the guess: a tree that
+    // is missing a file the bundle has since added is a smaller problem than a tree seeded
+    // from a different extension.
+    if (cm && !source && !recorded) {
+      await ensureRunning(name, object);
+
+      return;
+    }
+
     // A clone reads the source pod; a built-in seed is already here. Either way the result is
     // one ConfigMap, and from the pod's point of view there is no difference between them.
-    // Three kinds of source now: a built-in seed that is already in this bundle, a repository
+    // Three kinds of source: a built-in seed that is already in this bundle, a repository
     // to clone, and the name of an extension running here to copy out of its pod.
-    const github = parseGithubSource(source);
+    const github = parseGithubSource(from);
     let files: Record<string, string>;
 
-    if (BUILT_IN_SEEDS.includes(source)) {
-      files = seedFiles(source);
+    if (BUILT_IN_SEEDS.includes(from)) {
+      files = seedFiles(from);
     } else if (github) {
       files = await githubFiles(github.repo, github.ref, name);
     } else {
-      files = await cloneFiles(source);
+      files = await cloneFiles(from);
     }
 
     const data = seedData(files);
+    const annotations = { [SOURCE_ANNOTATION]: from };
 
     if (cm) {
       await rancherFetch(`${ EXT_BASE }/v1/configmaps/${ EXT_NS }/${ object }`, {
         method: 'PUT',
-        body:   JSON.stringify({ ...cm, data }),
+        body:   JSON.stringify({
+          ...cm,
+          metadata: { ...cm.metadata, annotations: { ...(cm.metadata?.annotations || {}), ...annotations } },
+          data,
+        }),
       }).catch(() => null);
     } else {
       await rancherFetch(`${ EXT_BASE }/v1/configmaps`, {
@@ -617,51 +704,15 @@ export function ensureExtension(name: string, source = DEFAULT_SEED): Promise<vo
         body:   JSON.stringify({
           apiVersion: 'v1',
           kind:       'ConfigMap',
-          metadata:   { namespace: EXT_NS, name: object, labels: { app: object } },
+          metadata:   {
+            namespace: EXT_NS, name: object, labels: { app: object }, annotations,
+          },
           data,
         }),
       }).catch(() => null);
     }
 
-    // Deployment (node running the dev server over the seeded tree)
-    const existing = await extGet('apps.deployments', object);
-
-    if (!existing) {
-      await rancherFetch(`${ EXT_BASE }/v1/apps.deployments`, {
-        method: 'POST',
-        body:   JSON.stringify(deployment(name)),
-      }).catch(() => null);
-    } else if (existing.spec?.template?.spec?.serviceAccountName !== EXT_ACCOUNT) {
-      // The one thing an existing Deployment is brought up to date on.
-      //
-      // Everything else here is deliberately create-if-missing, because replacing a Deployment
-      // restarts a dev server somebody is editing in. This is the exception because a pod
-      // running as `default` has no rights at all, which is the difference between a terminal
-      // that can answer questions about the cluster and one that gets 403 to all of them - and
-      // no amount of granting fixes it, because the grant is to an account the pod is not using.
-      //
-      // It costs one restart, once. The tree and node_modules are on a hostPath, so the pod is
-      // back in seconds rather than reinstalling; what it does end is any tmux session in it.
-      existing.spec.template.spec.serviceAccountName = EXT_ACCOUNT;
-
-      await rancherFetch(`${ EXT_BASE }/v1/apps.deployments/${ EXT_NS }/${ object }`, {
-        method: 'PUT',
-        body:   JSON.stringify(existing),
-      }).catch(() => null);
-    }
-
-    // Service (ClusterIP :8005, what the service proxy above resolves to)
-    if (!await extGet('services', object)) {
-      await rancherFetch(`${ EXT_BASE }/v1/services`, {
-        method: 'POST',
-        body:   JSON.stringify({
-          apiVersion: 'v1',
-          kind:       'Service',
-          metadata:   { namespace: EXT_NS, name: object, labels: { app: object } },
-          spec:       { selector: { app: object }, ports: [{ name: 'http', port: EXT_PORT, targetPort: 'http' }] },
-        }),
-      }).catch(() => null);
-    }
+    await ensureRunning(name, object);
   })().finally(() => {
     delete ensureInFlight[name];
   });
@@ -1759,6 +1810,32 @@ async function upsertUiPlugin(
   }
 
   await rancherFetch(`${ EXT_BASE }/v1/${ type }`, { method: 'POST', body: JSON.stringify(body) });
+}
+
+/**
+ * Take this extension back out of the Rancher it was published into.
+ *
+ * The undo for the near half of the Publish button, and the whole of it: publishing locally
+ * makes one UIPlugin pointing at a URL the pod serves, so removing that object is the removal.
+ * The pod, its tree and everything in it are untouched - this is about what Rancher loads, not
+ * about the extension existing.
+ *
+ * Resolving the plugin's name through the package rather than assuming it matches the
+ * extension's, for the reason packageIdentity exists: the two agree by convention and not by
+ * construction, and an import can arrive with a package named after where it came from.
+ */
+export async function removeLocalInstall(name: string): Promise<string> {
+  const { name: plugin } = await packageIdentity(name);
+  const type = 'catalog.cattle.io.uiplugins';
+  const existing = await rancherFetch(`${ EXT_BASE }/v1/${ type }/${ PLUGIN_NS }/${ plugin }`).catch(() => null);
+
+  if (!existing) {
+    throw new Error(`${ plugin } is not installed in this Rancher`);
+  }
+
+  await rancherFetch(`${ EXT_BASE }/v1/${ type }/${ PLUGIN_NS }/${ plugin }`, { method: 'DELETE' });
+
+  return plugin;
 }
 
 /** What is installed right now, so the button can say "update" rather than "install". */

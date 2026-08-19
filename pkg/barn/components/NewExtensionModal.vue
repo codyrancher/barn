@@ -14,24 +14,18 @@
 //   <any>  an extension already running here, copied out of its pod as it is now, including
 //          whatever was changed in it an hour ago.
 import AppModal from '@shell/components/AppModal';
+import LabeledSelect from '@shell/components/form/LabeledSelect';
 import AsyncButton from '@shell/components/AsyncButton';
 import { Card } from '@components/Card';
 import { RcButton } from '@components/RcButton';
 import { Banner } from '@components/Banner';
 import { listExtensions, BUILT_IN_SEEDS } from '../extensions';
 
-// What each built-in is, in the one line the list has room for. Written here rather than beside
-// the seed itself because it is UI copy: the seed is a directory of files and has no opinion.
-const DESCRIPTIONS = {
-  base: 'The stock extension. One product, one page, and nothing else.',
-  dev:  "Barn's own extension: workspaces, terminals, sidecars, ports, the lot.",
-};
-
 export default {
   name: 'NewExtensionModal',
 
   components: {
-    AppModal, AsyncButton, Card, RcButton, Banner
+    AppModal, AsyncButton, Card, RcButton, Banner, LabeledSelect
   },
 
   props: {
@@ -62,17 +56,16 @@ export default {
      * offering both would be asking somebody to guess at a difference that will not matter.
      */
     options() {
-      const builtIns = BUILT_IN_SEEDS.map((id) => ({
-        id, label: id, description: DESCRIPTIONS[id] || '', kind: 'seed',
-      }));
+      const builtIns = BUILT_IN_SEEDS.map((id) => ({ label: id, value: id }));
+      // An extension that is not running has no pod to copy out of, so it is listed and refused
+      // rather than hidden: it is a thing you have, and being told why is better than looking
+      // for it.
       const clones = this.running
         .filter((extension) => !BUILT_IN_SEEDS.includes(extension.name))
         .map((extension) => ({
-          id:          extension.name,
-          label:       extension.name,
-          description: extension.ready ? 'Copied from its pod as it is now.' : 'Not running, so there is nothing to copy yet.',
-          kind:        'clone',
-          disabled:    !extension.ready,
+          label:    extension.ready ? extension.name : `${ extension.name } (not running)`,
+          value:    extension.name,
+          disabled: !extension.ready,
         }));
 
       return [...builtIns, ...clones];
@@ -110,7 +103,7 @@ export default {
     >
       <template #title>
         <h4 class="text-default-text">
-          Create {{ name }}
+          Create New Extension "{{ name }}"
         </h4>
       </template>
 
@@ -121,35 +114,12 @@ export default {
           :label="error"
         />
 
-        <p class="new-extension__intro">
-          What should it start as? Every option is a copy: nothing is shared afterwards, and what
-          you do to this one does not touch what it came from.
-        </p>
-
-        <label
-          v-for="option in options"
-          :key="option.id"
-          class="new-extension__option"
-          :class="{
-            'new-extension__option--current': option.id === source,
-            'new-extension__option--disabled': option.disabled,
-          }"
-        >
-          <input
-            v-model="source"
-            type="radio"
-            :value="option.id"
-            :disabled="option.disabled"
-          >
-          <span class="new-extension__label">
-            <span class="new-extension__name">{{ option.label }}</span>
-            <span
-              v-if="option.kind === 'clone'"
-              class="new-extension__tag"
-            >running here</span>
-          </span>
-          <span class="new-extension__description">{{ option.description }}</span>
-        </label>
+        <LabeledSelect
+          v-model:value="source"
+          label="Clone From"
+          :options="options"
+          :clearable="false"
+        />
       </template>
 
       <template #actions>
@@ -175,62 +145,6 @@ export default {
 
 <style lang="scss" scoped>
 .new-extension {
-  &__intro {
-    max-width: 70ch;
-    margin-bottom: 15px;
-    color: var(--muted);
-  }
-
-  &__option {
-    display:               grid;
-    grid-template-columns: auto 1fr;
-    gap:                   2px 10px;
-    align-items:           center;
-    padding:               8px 10px;
-    margin-bottom:         6px;
-    border:                1px solid var(--border);
-    border-radius:         var(--border-radius);
-    cursor:                pointer;
-
-    &--current {
-      border-color: var(--primary);
-    }
-
-    &--disabled {
-      cursor:  not-allowed;
-      opacity: 0.6;
-    }
-
-    input {
-      grid-row: span 2;
-    }
-  }
-
-  &__label {
-    display:     flex;
-    align-items: center;
-    gap:         8px;
-  }
-
-  &__name {
-    font-weight: 600;
-    font-family: monospace;
-  }
-
-  &__tag {
-    padding:       1px 6px;
-    border-radius: 10px;
-    background:    var(--accent-btn);
-    color:         var(--muted);
-    font-size:     10px;
-  }
-
-  &__description {
-    grid-column: 2;
-    color:       var(--muted);
-    font-size:   12px;
-  }
-
   &__actions {
     display:         flex;
     gap:             10px;
