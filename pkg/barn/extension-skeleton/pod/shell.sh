@@ -26,7 +26,18 @@ SESSION=${1:-main}
 # this reason. Callers that want several independent sessions (the Dev product's
 # global terminals) pass one per session; callers that want the source tree pass
 # nothing.
-WORKDIR=${2:-/app/pkg/dev-extension}
+#
+# The source tree is found rather than named. It used to be spelled out, because every pod
+# served the same package; now a pod serves whatever it was seeded, cloned or imported as, and
+# the directory is called whatever that package's name is. First directory under /app/pkg, the
+# same rule PACKAGE_DIR uses on the other side of this. /app is the fallback's fallback, for a
+# pod whose tree has not been written yet - a shell in the wrong directory beats no shell.
+WORKDIR=$2
+
+if [ -z "$WORKDIR" ]; then
+  WORKDIR=$(ls -d /app/pkg/*/ 2>/dev/null | head -1 | sed 's|/$||')
+  WORKDIR=${WORKDIR:-/app}
+fi
 
 # Where claude's login and settings live, which has to be on whatever storage
 # outlives the pod or every restart is another /login. It is an argument because

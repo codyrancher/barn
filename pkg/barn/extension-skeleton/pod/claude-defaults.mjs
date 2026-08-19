@@ -22,9 +22,22 @@ const SETTINGS = path.join(HOME, '.claude', 'settings.json');
 // The directories a pane may start claude in, which is not the same list in
 // every pod: the dev server's tabs land in its own tree, and a workspace's land
 // in the checkout it cloned. shell.sh passes the pane's own directory; the
-// default is the dev server pod's source and the app around it, which is what
-// boot.sh's background run has no directory to pass.
-const TRUSTED = (process.env.TRUST_DIRS || '/app/pkg/dev-extension:/app').split(':').filter(Boolean);
+// default is this pod's source and the app around it, which is what boot.sh's
+// background run has no directory to pass.
+//
+// Found rather than named, because the package directory is called whatever the package is
+// called - the same rule PACKAGE_DIR uses. A pod with no tree yet trusts /app alone.
+function packageDir() {
+  try {
+    const dirs = fs.readdirSync('/app/pkg', { withFileTypes: true }).filter((entry) => entry.isDirectory());
+
+    return dirs.length ? [path.join('/app/pkg', dirs[0].name)] : [];
+  } catch {
+    return [];
+  }
+}
+
+const TRUSTED = (process.env.TRUST_DIRS ? process.env.TRUST_DIRS.split(':') : [...packageDir(), '/app']).filter(Boolean);
 
 function read(file) {
   try {

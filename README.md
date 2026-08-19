@@ -8,17 +8,22 @@ explorer: **Closets**, dev environments provisioned from the `closet` Helm chart
 start. It also registers an **Editor** page, which is claude in a pod on the left and what
 claude is editing on the right.
 
-`pkg/barn/dev-extension` is the second one. It is a whole Rancher dashboard with a
-`dev-extension` package compiled into it, running as a pod in the cluster, reached through
-the Kubernetes apiserver's service proxy on Rancher's own origin. Editing a file in that pod
-recompiles and hot-reloads it in the browser, so it is an extension you develop by using it,
-with no build step and nothing to reinstall. `pkg/barn` creates it on load, from a seed baked
-into the bundle, which is why it lives under `pkg/barn` rather than beside it.
+An extension it creates is a whole Rancher dashboard with that package compiled into it,
+running as a pod in the cluster, reached through the Kubernetes apiserver's service proxy on
+Rancher's own origin. Editing a file in that pod recompiles and hot-reloads it in the browser,
+so it is an extension you develop by using it, with no build step and nothing to reinstall.
 
-Inside it is the **Dev** product: the Claude Harness rebuilt on Kubernetes. A workspace is a
-namespace with a Deployment and a Service, on any cluster this Rancher manages, with
-terminals on the pod's exec subresource, conversations that are tmux sessions, forwarded and
-password-shared ports, GitHub work queues, and a SQLite database per person.
+`pkg/barn/extension-skeleton` is what a pod is built out of - the dashboard around the package
+and the scripts that run inside it - and `pkg/barn/base-extension` is the stock package a new
+extension is seeded from. Both are baked into the bundle, because a pod has to be given a tree
+before anything in it can fetch one.
+
+Anything else comes from a repository. The **Dev** product - the Claude Harness rebuilt on
+Kubernetes, where a workspace is a namespace with a Deployment and a Service, with terminals on
+the pod's exec subresource, conversations that are tmux sessions, forwarded and password-shared
+ports, GitHub work queues and a SQLite database per person - used to be vendored here as a
+second seed. It lives in [codyrancher/dev-extension](https://github.com/codyrancher/dev-extension)
+now, and arrives through **Import from GitHub** like anybody else's would.
 
 ## Layout
 
@@ -27,15 +32,15 @@ barn/
 ├── pkg/barn/                     the extension Rancher loads
 │   ├── product.ts                nav, spoofed types, the two resources
 │   ├── api.ts                    closets, secret sets, the editor pod
-│   ├── dev-extension.ts          creates the DevExtension in the cluster
-│   ├── dev-extension-seed.generated.ts    its source, baked in
+│   ├── extensions.ts             creates an extension's pod in the cluster
+│   ├── extension-seed.generated.ts    the skeleton and base package, baked in
 │   ├── detail/ edit/ models/     barn.closet, barn.secret-set
-│   └── dev-extension/            the DevExtension's own source tree
-│       ├── pkg/dev-extension/    the package the pod serves
+│   ├── base-extension/           the stock package a new extension starts as
+│   └── extension-skeleton/       what a pod is built out of
 │       └── pod/                  the scripts a terminal runs in the pod
 ├── deploy/closet/                the Helm chart a closet is
 ├── images/closet/                the container a closet runs
-└── scripts/                      seed generation, checks, live sync
+└── scripts/                      seed generation and applying
 ```
 
 ## Building it
@@ -51,34 +56,31 @@ That writes `dist-pkg/barn-<version>/barn-<version>.umd.min.js`. Load it into Ra
 Extensions → ⋮ → Developer Load, after enabling extension developer features in user
 preferences.
 
-## Working on the DevExtension
+## Working on what a pod is made of
 
-Its source is `pkg/barn/dev-extension/`, and it reaches the cluster two ways.
-
-A **fresh pod** is seeded from `pkg/barn/dev-extension-seed.generated.ts`, which is generated
-and committed. Regenerate it after editing anything under `pkg/barn/dev-extension/`:
-
-```bash
-node scripts/gen-dev-extension-seed.mjs
-```
-
-A **running pod** is updated in place, which is the loop worth using, because a restart costs
-whatever else is in the pod (a conversation part way through, an install):
+The skeleton (`pkg/barn/extension-skeleton/`) and the stock package
+(`pkg/barn/base-extension/`) are baked into the bundle as a seed, which is generated and
+committed. Regenerate it after editing either:
 
 ```bash
-./scripts/sync-dev-extension.sh          # checks, syncs, waits for the compile
-node scripts/check-dev-extension.mjs     # what the sync runs first, on its own
+node scripts/gen-extension-seed.mjs
 ```
 
-Editing anything in `pod/` needs a third step, and it is the one that gets forgotten. Those
-files are mounted from a ConfigMap, so regenerating the seed only reaches a *fresh* pod:
+That reaches a **fresh pod**. Editing anything in `pod/` needs a third step, and it is the one
+that gets forgotten: those files are mounted from a ConfigMap and are run straight off the
+mount, so writing the ConfigMap reaches a pod that already exists, without restarting it.
 
 ```bash
-node scripts/apply-dev-extension-seed.mjs
+node scripts/apply-extension-seed.mjs            # the default extension
+node scripts/apply-extension-seed.mjs myThing    # a particular one
 ```
 
-See `pkg/barn/dev-extension/README.md` for how the proxy, the asset URLs and hot reload fit
-together.
+See `pkg/barn/extension-skeleton/README.md` for how the proxy, the asset URLs and hot reload
+fit together.
+
+Working on an extension's *package* does not happen here at all. It happens in the pod, which
+is the point of the thing: edit it in the Editor and it hot-reloads. Getting it out of the pod
+and somewhere permanent is Publish to GitHub.
 
 ## Publishing it
 

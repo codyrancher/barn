@@ -49,15 +49,12 @@
   ],
   "exclude": [
     "../../node_modules",
-    // The DevExtension is a separate dashboard package that happens to live in this directory,
-    // because this package plants it in the cluster from a seed baked into its own bundle. It is
-    // never imported from here (only the generated seed is, and that is a file of strings), so
-    // compiling it as part of this package type-checks it against the wrong tsconfig: its own is
-    // dev-extension/tsconfig.json, and scripts/check-dev-extension.mjs is what runs it.
-    //
-    // base-extension is the same thing for the same reason: the stock extension a new one can
-    // be seeded from, compiled in whatever pod it is seeded into rather than here.
-    "dev-extension",
+    // Neither of these is part of this package. They are what a pod is built out of: the
+    // skeleton is the dashboard around an extension (its package.json and the scripts that run
+    // in the pod), and base-extension is the stock package a new one is seeded from. Both are
+    // compiled in whatever pod they are seeded into, against that pod's own tsconfig, and only
+    // the generated seed is imported from here - a file of strings.
+    "extension-skeleton",
     "base-extension"
   ]
 }

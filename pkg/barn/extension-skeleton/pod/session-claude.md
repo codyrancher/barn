@@ -11,8 +11,8 @@ because the contents change and a file that describes them goes stale.
 ## The pod you are in
 
 `vue-cli-service serve` is running over `/app`, a whole Rancher dashboard with the extension
-compiled into it. `/app/pkg/$EXTENSION_NAME-extension` (or `/app/pkg/dev-extension` if this pod
-was made before extensions had names) is that extension's source, and it is the live one:
+compiled into it. The one directory under `/app/pkg` is that extension's source - it is named after the package
+rather than after the extension - and it is the live one:
 saving a file there is recompiled and pushed into the browser over the hot-reload socket within
 seconds. There is no build step and no server to restart, and **restarting the dev server is the
 one thing that interrupts whoever is watching it**.
@@ -91,10 +91,10 @@ everything above, which is why this file lists it.
 
 ## The rules of this tree
 
-- **Nothing here syncs back.** The repo copy lives in the barn repo at
-  `pkg/barn/dev-extension/`, which is what a fresh pod is seeded from. A change meant to outlive
-  this pod has to be copied back there. If you are asked to make something permanent and you
-  cannot reach the repo, say so rather than assuming the edit will survive.
+- **Nothing here syncs back.** This tree lives as long as the pod's `/app` does. A change meant
+  to outlive it has to leave: Publish to GitHub pushes this package to a repository, which is
+  also how it is imported back. If you are asked to make something permanent and cannot reach a
+  repository, say so rather than assuming the edit will survive.
 - **Do not restart the dev server.** Somebody is watching the pane it serves.
 - **`yarn install` is minutes.** Adding a dependency is a real cost here and it survives only as
   long as this pod's `/app` does.

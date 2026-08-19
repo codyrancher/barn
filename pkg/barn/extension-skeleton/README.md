@@ -4,12 +4,12 @@ A Rancher extension whose dev server runs as a pod inside the Rancher instance i
 into, and is edited inside that pod. Save a file in the pod and the page updates live, with
 no rebuild, no install and nothing running outside the cluster.
 
-The pod serves a *whole dashboard* with the `dev-extension` package compiled in, plus webpack
+The pod serves a *whole dashboard* with the extension package compiled in, plus webpack
 HMR. The browser reaches it through the Kubernetes apiserver's service proxy, on Rancher's
 own origin:
 
 ```
-https://<rancher>/k8s/clusters/local/api/v1/namespaces/barn/services/http:barn-dev-extension:8005/proxy/
+https://<rancher>/k8s/clusters/local/api/v1/namespaces/barn/services/http:barn-<name>-extension:8005/proxy/
 ```
 
 So it is a second dashboard at a URL of its own. Rancher's own UI is untouched: no
@@ -21,20 +21,21 @@ back when you are done. The **Dev Extension** button in the Rancher header opens
 ```
   barn extension (loaded in Rancher)
      |
-     |  ensureDevExtension()  on plugin load
+     |  ensureExtension(name)  on plugin load, and on demand
      v
-  ConfigMap  barn-dev-extension    <- the seed: this directory, baked in
-  Deployment barn-dev-extension    <- node:24, runs /seed/boot.sh
-  Service    barn-dev-extension    <- ClusterIP :8005
+  ConfigMap  barn-<name>-extension    <- the seed: this directory, baked in
+  Deployment barn-<name>-extension    <- node:24, runs /seed/boot.sh
+  Service    barn-<name>-extension    <- ClusterIP :8005
      ^
      |  apiserver service proxy (same origin as Rancher, needs a session)
      |
   browser: assets, index.html, and the HMR websocket
 ```
 
-- `pkg/dev-extension/` is the extension itself: its own product with a Live Reload Demo page,
-  a `Floof` page registered into Rancher's Cluster Explorer, and model overrides for
-  ConfigMap and Secret. This is the part you edit.
+- The package itself is not here. It arrives from one of three places - the stock one in
+  `pkg/barn/base-extension/`, a repository, or the live tree of an extension already running -
+  and lands in the pod as the one directory under `/app/pkg`, named after the package rather
+  than after the extension. That is the part you edit, and you edit it in the pod.
 - `pod/boot.sh` is the container's command. It hands the tree to the `node` user, seeds it out
   of the ConfigMap, installs, and starts the dev server.
 - `pod/vue.config.js` is the dev server config, seeded to `/app/vue.config.js`. It is the one
@@ -45,12 +46,12 @@ back when you are done. The **Dev Extension** button in the Rancher header opens
 - `package.json`, `babel.config.js` and `tsconfig.json` are the app skeleton the dev server
   needs around the package.
 - The seed is generated, not hand-copied:
-  `node scripts/gen-dev-extension-seed.mjs` writes
-  `pkg/barn/dev-extension-seed.generated.ts`. **Run it after editing anything here.**
+  `node scripts/gen-extension-seed.mjs` writes
+  `pkg/barn/extension-seed.generated.ts`. **Run it after editing anything here.**
   The output is committed, so normal builds and CI never run it.
 
 Nothing is parameterised. Every name and port is a constant in
-`pkg/barn/dev-extension.ts`, and the proxy path the pod is told about is built from
+`pkg/barn/extensions.ts`, and the proxy path the pod is told about is built from
 those same constants, so neither this build nor the pod ever learns what hostname Rancher is
 served on.
 
@@ -93,11 +94,11 @@ that opens before that finishes waits for it, visibly, instead.
 
 The pod's tree is the live source once it has booted. There is no local working copy to keep
 in sync. The terminal in the editor's left pane is already there, and claude in it is already
-pointed at `pkg/dev-extension` (with a `CLAUDE.md` explaining where it is). Otherwise:
+pointed at the package (with a `CLAUDE.md` explaining where it is). Otherwise:
 
 ```bash
-kubectl -n barn exec -it deploy/barn-dev-extension \
-  -- bash -c 'cd /app/pkg/dev-extension && exec bash'
+kubectl -n barn exec -it deploy/barn-<name>-extension \
+  -- bash -c 'cd "$(ls -d /app/pkg/*/ | head -1)" && exec bash'
 ```
 
 Edit any file in there with ordinary tools and the page updates without a reload. That
@@ -112,7 +113,7 @@ To pull an edit back into the repo, copy it out (`kubectl cp`) and regenerate th
 - **First boot takes a few minutes.** It pulls `node:24`, installs dependencies and compiles
   the dashboard. The pod is not ready until it can serve, and the startup probe has a 15
   minute budget so the kubelet does not restart a pod that is working fine. The tree and
-  `node_modules` live on the node under `/var/lib/rancher/barn/dev-extension`, so
+  `node_modules` live on the node under `/var/lib/rancher/barn/<name>-extension`, so
   later restarts skip all of that.
 - **Everything in the pod runs as the `node` user**, not root: claude refuses
   `--dangerously-skip-permissions` as root, and it has to own the files webpack is watching.
@@ -127,4 +128,4 @@ To pull an edit back into the repo, copy it out (`kubectl cp`) and regenerate th
   have, so a new file reaches an existing pod while edits made in there survive. The one
   exception is `vue.config.js`, refreshed every boot, since it is plumbing rather than
   something anyone edits in the pod. To start over completely, delete the deployment and the
-  `/var/lib/rancher/barn/dev-extension` directory on the node.
+  `/var/lib/rancher/barn/<name>-extension` directory on the node.

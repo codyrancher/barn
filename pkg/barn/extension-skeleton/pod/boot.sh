@@ -2,9 +2,9 @@
 # Entrypoint for the dev server pod.
 #
 # A real file rather than a string built in TypeScript: it is baked into the seed ConfigMap
-# verbatim by scripts/gen-dev-extension-seed.mjs, so what is in the repo is exactly what
+# verbatim by scripts/gen-extension-seed.mjs, so what is in the repo is exactly what
 # runs. The only thing substituted is __PATH_SEPARATOR__, read out of
-# pkg/barn/dev-extension.ts, so the flattening this loop undoes cannot drift from
+# pkg/barn/extensions.ts, so the flattening this loop undoes cannot drift from
 # the flattening that produced the ConfigMap keys.
 set -e
 

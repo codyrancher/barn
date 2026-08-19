@@ -46,7 +46,7 @@ export default {
       default: '',
     },
 
-    // Set when the last publish succeeded, e.g. "dev-extension 0.1.0".
+    // Set when the last publish succeeded, e.g. "base 0.1.0".
     done: {
       type:    String,
       default: '',
