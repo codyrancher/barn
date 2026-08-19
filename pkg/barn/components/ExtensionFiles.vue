@@ -1,6 +1,11 @@
 <script>
 // The extension's source, in the pod, with its history beside it.
 //
+// A tab in the editor's left pane rather than a modal over it, which is the point: the files
+// and the terminal are two views of one pod, and looking at one used to mean covering the
+// other. As a tab it is beside the CLI, and switching does not interrupt what claude is doing
+// - the terminal stays mounted underneath (see the editor's v-show).
+//
 // This started as a list of the four files that tell claude what to do, which was useful and
 // too narrow: the interesting question in a pod is not only "what was it told" but "what is
 // there and what has changed". So it is the whole package now - every file under
@@ -12,12 +17,9 @@
 // a commit of the seeded state, which is what makes a branch dropdown and a commit list mean
 // anything. Nothing here pushes anywhere - the remote for this work is the barn repo, and
 // getting there is still copying files back.
-import AppModal from '@shell/components/AppModal';
 import AsyncButton from '@shell/components/AsyncButton';
 import LabeledSelect from '@shell/components/form/LabeledSelect';
 import { LabeledInput } from '@components/Form/LabeledInput';
-import { Card } from '@components/Card';
-import { RcButton } from '@components/RcButton';
 import { Banner } from '@components/Banner';
 import FileTree from './FileTree.vue';
 import DiffView from './DiffView.vue';
@@ -105,10 +107,10 @@ const MESSAGE_LINES = 10;
 const COMMITS_SHOWN = 3;
 
 export default {
-  name: 'ExtensionFilesModal',
+  name: 'ExtensionFiles',
 
   components: {
-    AppModal, AsyncButton, LabeledSelect, LabeledInput, Card, RcButton, Banner, FileTree, DiffView
+    AsyncButton, LabeledSelect, LabeledInput, Banner, FileTree, DiffView
   },
 
   props: {
@@ -118,8 +120,6 @@ export default {
       required: true,
     },
   },
-
-  emits: ['close'],
 
   data() {
     return {
@@ -315,205 +315,177 @@ export default {
 </script>
 
 <template>
-  <AppModal
-    name="barn-extension-files"
-    :width="1000"
-    @close="$emit('close')"
-  >
-    <Card
-      class="ext-files"
-      :show-highlight-border="false"
-    >
-      <template #title>
-        <h4 class="text-default-text">
-          {{ extension }} files
-        </h4>
-      </template>
+  <div class="ext-files">
+    <Banner
+      v-if="error"
+      color="error"
+      :label="error"
+    />
 
-      <template #body>
-        <Banner
-          v-if="error"
-          color="error"
-          :label="error"
+    <div
+      v-if="loading"
+      class="text-muted"
+    >
+      Looking in the pod
+    </div>
+
+    <div
+      v-else
+      class="ext-files__panes"
+    >
+      <div class="ext-files__side">
+        <LabeledSelect
+          class="ext-files__branch"
+          label="Branch"
+          :value="branch"
+          :options="branchOptions"
+          :taggable="true"
+          :searchable="true"
+          :clearable="false"
+          :compact-input="true"
+          @update:value="onBranch"
         />
 
         <div
-          v-if="loading"
-          class="text-muted"
+          class="ext-files__commits"
+          :class="{ 'ext-files__commits--all': allCommits }"
         >
-          Looking in the pod
-        </div>
-
-        <div
-          v-else
-          class="ext-files__panes"
-        >
-          <div class="ext-files__side">
-            <LabeledSelect
-              class="ext-files__branch"
-              label="Branch"
-              :value="branch"
-              :options="branchOptions"
-              :taggable="true"
-              :searchable="true"
-              :clearable="false"
-              :compact-input="true"
-              @update:value="onBranch"
-            />
-
-            <div
-              class="ext-files__commits"
-              :class="{ 'ext-files__commits--all': allCommits }"
-            >
-              <div class="ext-files__heading">
-                Commits on {{ branch }}
-              </div>
-              <ol>
-                <li
-                  v-for="entry in visibleCommits"
-                  :key="entry.sha"
-                >
-                  <button
-                    type="button"
-                    class="ext-files__commit-row"
-                    :class="{ 'ext-files__commit-row--current': entry.sha === showing }"
-                    @click="openCommit(entry.sha)"
-                  >
-                    <span class="ext-files__sha">{{ entry.sha }}</span>
-                    <span class="ext-files__subject">{{ entry.subject }}</span>
-                    <span class="ext-files__when">{{ entry.when }}</span>
-                  </button>
-                </li>
-              </ol>
-              <div
-                v-if="!commits.length"
-                class="text-muted"
-              >
-                None yet.
-              </div>
-              <button
-                v-if="hiddenCommits || allCommits"
-                type="button"
-                class="ext-files__more"
-                @click="allCommits = !allCommits"
-              >
-                {{ allCommits ? 'Show fewer' : `Show all ${ commits.length }` }}
-              </button>
-            </div>
-
-            <nav class="ext-files__tree">
-              <FileTree
-                v-for="dir in tree.dirs"
-                :key="dir.path"
-                :node="dir"
-                :current="selected"
-                @select="open"
-              />
-              <button
-                v-for="file in tree.files"
-                :key="file.path"
-                type="button"
-                class="ext-files__loose"
-                :class="{ 'ext-files__loose--current': file.path === selected }"
-                @click="open(file.path)"
-              >
-                {{ file.name }}
-              </button>
-            </nav>
-
+          <div class="ext-files__heading">
+            Commits on {{ branch }}
           </div>
-
-          <div class="ext-files__editor">
-            <!--
-              The commit and what it is about, over the file being edited rather than in the
-              footer beside Close. A message describes work in this pane, and down there it was
-              as far from that work as the dialog allowed.
-            -->
-            <div
-              v-if="changes"
-              class="ext-files__commit"
+          <ol>
+            <li
+              v-for="entry in visibleCommits"
+              :key="entry.sha"
             >
-              <!--
-                Labelled, like the branch box across from it. A LabeledSelect carrying a label
-                is a two-row control and a placeholder-only input is one, so without this they
-                were different heights side by side for a structural reason rather than a
-                stylistic one.
-
-                It grows downward over the file view rather than pushing it, which is what the
-                absolute positioning below is for: a commit message that runs to a paragraph is
-                normal, and the file underneath sliding down every time somebody presses return
-                is not something to do to a person who is reading it.
-              -->
-              <LabeledInput
-                v-model:value="message"
-                class="ext-files__message"
-                type="multiline"
-                :label="`Commit message (${ changes } changed file${ changes === 1 ? '' : 's' })`"
-                :compact-input="true"
-                :min-height="MESSAGE_LINE"
-                :max-height="MESSAGE_LINE * MESSAGE_LINES"
-              />
-              <AsyncButton
-                mode="edit"
-                action-label="Commit"
-                waiting-label="Committing"
-                success-label="Committed"
-                @click="commit"
-              />
-            </div>
-            <!--
-              One box, with what it is showing named along its top. The name used to be a label
-              floating between the message and the box, which is a third thing to space and the
-              first thing to get squashed when the dialog is short.
-            -->
-            <div class="ext-files__view">
-              <div class="ext-files__view-head">
-                {{ showing ? `commit ${ showing }` : (selected || 'Nothing open') }}
-              </div>
-
-              <div
-                v-if="showing"
-                class="ext-files__view-body"
+              <button
+                type="button"
+                class="ext-files__commit-row"
+                :class="{ 'ext-files__commit-row--current': entry.sha === showing }"
+                @click="openCommit(entry.sha)"
               >
-                <div
-                  v-if="diffLoading"
-                  class="text-muted"
-                >
-                  Reading the commit
-                </div>
-                <DiffView
-                  v-else
-                  :patch="diff"
-                  :subject="showingSubject"
-                />
-              </div>
-
-              <!--
-                Read-only. This is a browser for what is in the pod, not an editor: the editing
-                happens in the pane behind this dialog, by the thing running there, and a second
-                place to change the same files is a second place for them to disagree.
-              -->
-              <pre
-                v-else
-                class="ext-files__view-body ext-files__file-body"
-              >{{ contents }}</pre>
-            </div>
-          </div>
-        </div>
-      </template>
-
-      <template #actions>
-        <div class="ext-files__actions">
-          <RcButton
-            variant="tertiary"
-            @click="$emit('close')"
+                <span class="ext-files__sha">{{ entry.sha }}</span>
+                <span class="ext-files__subject">{{ entry.subject }}</span>
+                <span class="ext-files__when">{{ entry.when }}</span>
+              </button>
+            </li>
+          </ol>
+          <div
+            v-if="!commits.length"
+            class="text-muted"
           >
-            Close
-          </RcButton>
+            None yet.
+          </div>
+          <button
+            v-if="hiddenCommits || allCommits"
+            type="button"
+            class="ext-files__more"
+            @click="allCommits = !allCommits"
+          >
+            {{ allCommits ? 'Show fewer' : `Show all ${ commits.length }` }}
+          </button>
         </div>
-      </template>
-    </Card>
-  </AppModal>
+
+        <nav class="ext-files__tree">
+          <FileTree
+            v-for="dir in tree.dirs"
+            :key="dir.path"
+            :node="dir"
+            :current="selected"
+            @select="open"
+          />
+          <button
+            v-for="file in tree.files"
+            :key="file.path"
+            type="button"
+            class="ext-files__loose"
+            :class="{ 'ext-files__loose--current': file.path === selected }"
+            @click="open(file.path)"
+          >
+            {{ file.name }}
+          </button>
+        </nav>
+
+      </div>
+
+      <div class="ext-files__editor">
+        <!--
+          The commit and what it is about, over the file being edited rather than in the
+          footer beside Close. A message describes work in this pane, and down there it was
+          as far from that work as the dialog allowed.
+        -->
+        <div
+          v-if="changes"
+          class="ext-files__commit"
+        >
+          <!--
+            Labelled, like the branch box across from it. A LabeledSelect carrying a label
+            is a two-row control and a placeholder-only input is one, so without this they
+            were different heights side by side for a structural reason rather than a
+            stylistic one.
+
+            It grows downward over the file view rather than pushing it, which is what the
+            absolute positioning below is for: a commit message that runs to a paragraph is
+            normal, and the file underneath sliding down every time somebody presses return
+            is not something to do to a person who is reading it.
+          -->
+          <LabeledInput
+            v-model:value="message"
+            class="ext-files__message"
+            type="multiline"
+            :label="`Commit message (${ changes } changed file${ changes === 1 ? '' : 's' })`"
+            :compact-input="true"
+            :min-height="MESSAGE_LINE"
+            :max-height="MESSAGE_LINE * MESSAGE_LINES"
+          />
+          <AsyncButton
+            mode="edit"
+            action-label="Commit"
+            waiting-label="Committing"
+            success-label="Committed"
+            @click="commit"
+          />
+        </div>
+        <!--
+          One box, with what it is showing named along its top. The name used to be a label
+          floating between the message and the box, which is a third thing to space and the
+          first thing to get squashed when the dialog is short.
+        -->
+        <div class="ext-files__view">
+          <div class="ext-files__view-head">
+            {{ showing ? `commit ${ showing }` : (selected || 'Nothing open') }}
+          </div>
+
+          <div
+            v-if="showing"
+            class="ext-files__view-body"
+          >
+            <div
+              v-if="diffLoading"
+              class="text-muted"
+            >
+              Reading the commit
+            </div>
+            <DiffView
+              v-else
+              :patch="diff"
+              :subject="showingSubject"
+            />
+          </div>
+
+          <!--
+            Read-only. This is a browser for what is in the pod, not an editor: the editing
+            happens in the pane behind this dialog, by the thing running there, and a second
+            place to change the same files is a second place for them to disagree.
+          -->
+          <pre
+            v-else
+            class="ext-files__view-body ext-files__file-body"
+          >{{ contents }}</pre>
+        </div>
+      </div>
+    </div>
+  </div>
 </template>
 
 <style lang="scss" scoped>
@@ -533,11 +505,23 @@ $message-line: 20;
 $commit-button-width: 110px;
 
 .ext-files {
+  // Fills the tab. It used to be a modal, which is why the panes below were sized in `vh`:
+  // a dialog has to choose a height and leave the page visible around it. A pane already has
+  // one, so the job here is the opposite - take all of it and let the columns inside scroll.
+  display:        flex;
+  flex-direction: column;
+  min-height:     0;
+  height:         100%;
+  overflow:       hidden;
+  // The padding the Card used to provide. Without it the tree sits against the divider and the
+  // branch box against the bar above it.
+  padding:        10px;
+
   &__panes {
     display: flex;
     gap: 15px;
-    // Tall enough to be an editor and short enough to leave the modal on the screen.
-    height: 65vh;
+    flex: 1 1 auto;
+    min-height: 0;
   }
 
   &__side {

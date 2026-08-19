@@ -21,12 +21,16 @@ import ExtensionSelect from '../components/ExtensionSelect.vue';
 import AsyncButton from '@shell/components/AsyncButton';
 import { RcButton } from '@components/RcButton';
 import PublishStatus from '../components/PublishStatus.vue';
-import ExtensionFilesModal from '../components/ExtensionFilesModal.vue';
+import ExtensionFiles from '../components/ExtensionFiles.vue';
 import NewExtensionModal from '../components/NewExtensionModal.vue';
+import EditorSettingsModal from '../components/EditorSettingsModal.vue';
+import ImportExtensionModal from '../components/ImportExtensionModal.vue';
+import PublishGithubModal from '../components/PublishGithubModal.vue';
+import PublishSplit from '../components/PublishSplit.vue';
 import StartingExtensions from '../components/StartingExtensions.vue';
 import {
   ensureExtension, extensionReady, extensionUrl, extensionProxyPath, publishExtension,
-  DEFAULT_EXTENSION
+  publishExtensionToGithub, DEFAULT_EXTENSION
 } from '../extensions';
 
 // How close to an edge the divider can be dragged, in percent of the page.
@@ -69,8 +73,8 @@ export default {
   name: 'BarnEditor',
 
   components: {
-    RcIcon, RcButton, PodTerminal, ExtensionSelect, ExtensionFilesModal, NewExtensionModal, StartingExtensions, AsyncButton,
-    PublishStatus
+    RcIcon, RcButton, PodTerminal, ExtensionSelect, ExtensionFiles, NewExtensionModal, StartingExtensions, AsyncButton,
+    PublishStatus, EditorSettingsModal, ImportExtensionModal, PublishGithubModal, PublishSplit
   },
 
   data() {
@@ -82,9 +86,26 @@ export default {
       // Bookkeeping for the dev server poll, so it stops with the page.
       unmounted:    false,
       devPollTimer: null,
-      // Whether the source browser is open. The left bar is about the source and about claude,
-      // and this is the first thing on it.
-      showFiles: false,
+      // Which of the left pane's two views is showing. The terminal stays mounted whichever it
+      // is (see the template): it is a live session, and unmounting it to look at a file would
+      // end whatever claude was in the middle of.
+      leftTab: 'cli',
+      // Whether the settings modal is open. It sits at the other end of the same bar as Files,
+      // because both are about the pane under it rather than about the dashboard on the right.
+      showSettings: false,
+      // Whether the import modal is open. It is reached from the same dropdown as the two
+      // publishes, which is not where an import belongs by rights - but that dropdown is where
+      // "the other things this button can do" already lives, and a fourth control on this bar
+      // would cost more than the misfiling does.
+      importing: false,
+      // Whether the "where to" question for a GitHub publish is open.
+      publishingGithub: false,
+      // Which modal sent us to settings, so closing settings can put that one back rather than
+      // dropping somebody where they did not start. '' when settings was opened from the cog.
+      settingsReturn: '',
+      // One publish at a time. AsyncButton used to refuse a second press by itself; a split
+      // button has two ways in, so the refusal has to be here instead.
+      publishing: false,
       // The name typed into the box that does not exist yet, held while the modal asks what it
       // should be a copy of.
       creating:  '',
@@ -109,6 +130,28 @@ export default {
   },
 
   computed: {
+    /**
+     * What the far half of the Publish button offers.
+     *
+     * Only the one for now, and it is a list rather than a second button because what goes in
+     * here next - a release, a chart, a different repository - is another line rather than
+     * another control on a bar that is already full.
+     */
+    /** The left pane's two views. A list so the bar is a loop rather than two copies of a button. */
+    leftTabs() {
+      return [
+        { id: 'cli', label: 'CLI' },
+        { id: 'files', label: 'Files' },
+      ];
+    },
+
+    publishOptions() {
+      return [
+        { id: 'github', label: 'Publish to GitHub' },
+        { id: 'import', label: 'Import from GitHub' },
+      ];
+    },
+
     // Which extension this editor is pointed at. A path segment rather than a fixed name, so
     // the header's box can send you between them, and defaulted so every link that predates
     // there being more than one still works.
@@ -298,35 +341,120 @@ export default {
     },
 
     /**
-     * Build this extension and install it into the Rancher around us.
+     * Publish this extension, one way or the other.
      *
-     * Minutes, not seconds: it is a production build of a Rancher package, run in the pod, and
-     * the socket stays open for the whole of it. AsyncButton is what makes that bearable - it
-     * says it is working and refuses a second press.
+     * `local` builds it in the pod and points this Rancher at the result, which reaches exactly
+     * the cluster you are standing in. `github` pushes the package's source to the configured
+     * repository, which is the half that outlives this cluster. Both are minutes rather than
+     * seconds and both report through the same status strip, so they share this.
+     *
+     * The progress the strip counts is the running publish's own: the two have different
+     * stages, and `total` arrives with each report rather than being read from a constant, so
+     * the bar is right for whichever is running without this having to know which.
      */
-    async publish(done) {
+    /**
+     * What the dropdown's lines do.
+     *
+     * Import is not a publish and does not go near publishTo: it opens a modal and the work
+     * happens afterwards, through the same onCreate every other new extension goes through.
+     */
+    /**
+     * Settings, from a modal that needed a token it did not have.
+     *
+     * Two modals send people here and both are mid-task, so settings remembers which one and
+     * closing it goes back there. One at a time: the modal that asked is closed first, because
+     * two of them open at once is a dialog on top of a dialog and no way back from either.
+     */
+    openSettingsFrom(from) {
+      this.publishingGithub = false;
+      this.importing = false;
+      this.settingsReturn = from;
+      this.showSettings = true;
+    },
+
+    closeSettings() {
+      const from = this.settingsReturn;
+
+      this.showSettings = false;
+      this.settingsReturn = '';
+
+      if (from === 'publish') {
+        this.publishingGithub = true;
+      } else if (from === 'import') {
+        this.importing = true;
+      }
+    },
+
+    onPublishSelect(id) {
+      if (id === 'import') {
+        this.importing = true;
+
+        return;
+      }
+
+      if (id === 'github') {
+        // Not published yet: where to is a question, and the modal asks it.
+        this.publishingGithub = true;
+
+        return;
+      }
+
+      this.publishTo(id);
+    },
+
+    async publishTo(target, repo) {
+      if (this.publishing) {
+        return;
+      }
+
+      this.publishing = true;
       this.publishError = '';
       this.published = '';
       this.publishLog = '';
 
+      const run = target === 'github'
+        ? (name, onProgress) => publishExtensionToGithub(name, repo, onProgress)
+        : publishExtension;
+
       try {
-        const result = await publishExtension(this.extension, (stage, label, total) => {
+        const result = await run(this.extension, (stage, label, total) => {
           this.publishStage = stage;
           this.publishLabel = label;
           this.publishTotal = total;
         });
 
-        this.published = `${ result.plugin } ${ result.version }`;
+        this.published = result.repo
+          ? `${ result.plugin } ${ result.version } to ${ result.repo }`
+          : `${ result.plugin } ${ result.version }`;
         this.publishLog = result.log;
-        done(true);
+
+        return true;
       } catch (e) {
         this.publishError = e.message || String(e);
         // PublishError carries the output and the step it died at; anything else is a message.
         this.publishLog = e.log || '';
         this.publishLabel = e.stage || this.publishLabel;
-        done(false);
+
+        return false;
       } finally {
         this.publishStage = 0;
+        this.publishing = false;
+      }
+    },
+
+    /**
+     * The answer to "where to", and the push that follows it.
+     *
+     * The modal closes on success and stays open on failure, because the thing most likely to
+     * be wrong is the repository in the box behind it.
+     */
+    async onPublishGithub({ repo, done }) {
+      const ok = await this.publishTo('github', repo);
+
+      done(ok);
+
+      if (ok) {
+        this.publishingGithub = false;
       }
     },
 
@@ -343,6 +471,13 @@ export default {
      * ten minutes is a long time to be sent away from the extension you were working on, and
      * that extension goes on working the whole time.
      */
+    /** The import modal's half of onCreate: close it, then create like anything else. */
+    onImport(event) {
+      this.importing = false;
+
+      return this.onCreate(event);
+    },
+
     async onCreate({ name, source, done }) {
       this.creating = '';
 
@@ -376,14 +511,39 @@ export default {
         class="mc-editor__bar"
         :style="{ width: `calc(${ split }% - 4px)` }"
       >
-        <RcButton
-          variant="secondary"
-          size="small"
-          data-testid="barn-agent-files-button"
-          @click="showFiles = true"
+        <div
+          class="mc-editor__tabs"
+          role="tablist"
         >
-          Files
-        </RcButton>
+          <button
+            v-for="tab in leftTabs"
+            :key="tab.id"
+            type="button"
+            role="tab"
+            class="mc-editor__tab"
+            :class="{ 'mc-editor__tab--current': leftTab === tab.id }"
+            :aria-selected="leftTab === tab.id"
+            :data-testid="`barn-left-tab-${ tab.id }`"
+            @click="leftTab = tab.id"
+          >
+            {{ tab.label }}
+          </button>
+        </div>
+        <!--
+          At the far end of this bar rather than beside Files, because it is not another thing
+          to do to the source: it is what the editor itself is configured with, and the two
+          would read as a pair if they sat together.
+        -->
+        <button
+          type="button"
+          class="mc-editor__cog"
+          title="Editor settings"
+          aria-label="Editor settings"
+          data-testid="barn-editor-settings-button"
+          @click="showSettings = true"
+        >
+          <i class="icon icon-gear" />
+        </button>
       </div>
       <div class="mc-editor__bar-gap" />
       <div class="mc-editor__bar mc-editor__bar--right">
@@ -412,15 +572,21 @@ export default {
           @open="openExtension"
           @create="createExtension"
         />
-        <AsyncButton
+        <!--
+          Two publishes, and the button says which is which rather than asking. The near half
+          is the one that is wanted almost every time - build it and point this Rancher at it -
+          and the far half is the one that leaves the cluster. What either is doing is on the
+          status strip to the left, which is why neither half has to say "Building" itself.
+        -->
+        <PublishSplit
           class="mc-editor__publish"
-          mode="edit"
-          action-label="Publish"
-          waiting-label="Building"
-          success-label="Published"
-          error-label="Build failed"
-          size="sm"
-          @click="publish"
+          label="Publish locally"
+          aria-label-trigger="Other ways to publish"
+          :items="publishOptions"
+          :disabled="publishing"
+          data-testid="barn-publish-button"
+          @click="publishTo('local')"
+          @select="onPublishSelect($event)"
         />
       </div>
     </div>
@@ -437,11 +603,26 @@ export default {
       class="mc-editor__panes"
       :class="{ 'mc-editor__panes--dragging': dragging }"
     >
-      <PodTerminal
-        class="mc-editor__pane"
-        :extension="extension"
+      <div
+        class="mc-editor__pane mc-editor__left"
         :style="{ width: `calc(${ split }% - 4px)` }"
-      />
+      >
+        <!--
+          v-show, not v-if: this is a websocket to a tmux session, and unmounting it to look at
+          a file would end the conversation in it. The files view is v-if for the opposite
+          reason - it is a read of the pod, and opening the tab is when it should be taken.
+        -->
+        <PodTerminal
+          v-show="leftTab === 'cli'"
+          class="mc-editor__left-view"
+          :extension="extension"
+        />
+        <ExtensionFiles
+          v-if="leftTab === 'files'"
+          class="mc-editor__left-view"
+          :extension="extension"
+        />
+      </div>
       <div
         class="mc-editor__divider"
         role="separator"
@@ -526,10 +707,24 @@ export default {
       </div>
     </div>
 
-    <ExtensionFilesModal
-      v-if="showFiles"
+    <EditorSettingsModal
+      v-if="showSettings"
+      @close="closeSettings"
+    />
+
+    <PublishGithubModal
+      v-if="publishingGithub"
       :extension="extension"
-      @close="showFiles = false"
+      @close="publishingGithub = false"
+      @publish="onPublishGithub"
+      @settings="openSettingsFrom('publish')"
+    />
+
+    <ImportExtensionModal
+      v-if="importing"
+      @close="importing = false"
+      @create="onImport"
+      @settings="openSettingsFrom('import')"
     />
 
     <NewExtensionModal
@@ -621,14 +816,24 @@ $rancher-rail-width: 70px;
 
   &__publish {
     flex: 0 0 auto;
+
+    // The split button is two buttons in a wrapper, so the thing that has to line up with the
+    // rest of the bar is the wrapper rather than either half of it.
+    display: inline-flex;
   }
 
   // One height for everything on the bar, said once. None of the shell's size props is this
   // number - small is 24 and the default is 30 - and a bar whose controls are three different
   // heights is what it looked like while each of them was left to its own.
+  //
+  // The `:deep` entries are the controls that live inside a child component: a scoped rule
+  // reaches a child's root element and nothing below it, so a plain `button` selector matches
+  // the cog and the old AsyncButton (whose root was the button) and silently misses both
+  // halves of the split button, whose buttons are two levels in.
   &__bar button,
   &__bar a,
-  &__bar :deep(.vs__dropdown-toggle) {
+  &__bar :deep(.vs__dropdown-toggle),
+  &__bar :deep(.rc-button-split button) {
     height:     $control-height;
     min-height: $control-height;
   }
@@ -761,6 +966,82 @@ $rancher-rail-width: 70px;
     min-height: 0;
     width:     100%;
     border:    none;
+  }
+
+  // One control with two halves rather than two buttons, so the pair reads as a switch between
+  // two views of the same pane. The border goes round the group and the divider is the seam
+  // between them; the current half is filled. Drawn only on the current one - which is what the
+  // first attempt did - left an unselected tab looking like plain text beside a button.
+  &__tabs {
+    display:       inline-flex;
+    flex:          0 0 auto;
+    border:        1px solid var(--border, #dcdee7);
+    border-radius: var(--border-radius);
+    overflow:      hidden;
+  }
+
+  &__tab {
+    padding:       0 12px;
+    background:    transparent;
+    border:        none;
+    // The seam. On the left of each but the first, so the group's own border stays the outside.
+    border-left:   1px solid var(--border, #dcdee7);
+    border-radius: 0;
+    color:         var(--muted);
+    font-size:     12px;
+    cursor:        pointer;
+
+    &:first-child {
+      border-left: none;
+    }
+
+    &:hover {
+      color: var(--body-text);
+    }
+
+    &--current {
+      background: var(--accent-btn);
+      color:      var(--body-text);
+    }
+  }
+
+  // The left pane is a box with two views in it rather than one component, so it has to do the
+  // filling the component used to do itself.
+  &__left {
+    display:        flex;
+    flex-direction: column;
+    min-width:      0;
+    overflow:       hidden;
+  }
+
+  &__left-view {
+    flex:       1 1 auto;
+    min-height: 0;
+    width:      100%;
+  }
+
+  // The same square as the popout at the other end of the other bar, so the two bars agree
+  // about what an icon-only control looks like. `auto` on the left rather than the right,
+  // because this one is the thing pushed to the end.
+  &__cog {
+    display:         inline-flex;
+    align-items:     center;
+    justify-content: center;
+    flex:            0 0 auto;
+    width:           $control-height;
+    height:          $control-height;
+    margin-left:     auto;
+    padding:         0;
+    background:      transparent;
+    border:          1px solid var(--border, #dcdee7);
+    border-radius:   var(--border-radius);
+    color:           var(--link);
+    cursor:          pointer;
+
+    &:hover {
+      background:   var(--accent-btn);
+      border-color: var(--primary);
+    }
   }
 
   &__popout {

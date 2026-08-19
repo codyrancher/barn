@@ -300,9 +300,17 @@ async function cloneFiles(source: string): Promise<Record<string, string>> {
     throw new Error(`could not read ${ source }'s tree: ${ out.slice(0, 200) || 'no output' }`);
   }
 
-  // The package keeps the directory name it had in the pod it came from, which is what makes
-  // this a copy rather than a rename. The skeleton and the pod scripts come from the default
-  // seed, because they are the same in every extension and are not part of what was cloned.
+  return withSkeleton(tree);
+}
+
+/**
+ * A cloned or imported package, plus the parts every extension has and nobody edits.
+ *
+ * The skeleton and the pod scripts come from the default seed because they are the same in
+ * every extension and are not part of what was copied; `pkg/` is stripped out of it so the
+ * copy's own package is the only one in the result.
+ */
+function withSkeleton(tree: Record<string, string>): Record<string, string> {
   const skeleton = { ...seedFiles(DEFAULT_SEED) };
 
   for (const key of Object.keys(skeleton)) {
@@ -312,6 +320,123 @@ async function cloneFiles(source: string): Promise<Record<string, string>> {
   }
 
   return { ...skeleton, ...tree };
+}
+
+/** `github:owner/repo`, or `github:owner/repo#branch`. Null for anything that is not one. */
+export function parseGithubSource(source: string): { repo: string; ref: string } | null {
+  const match = /^github:([\w.-]+\/[\w.-]+)(?:#(.+))?$/.exec(source);
+
+  return match ? { repo: match[1], ref: match[2] || '' } : null;
+}
+
+/**
+ * Walks the clone rather than the pod's own tree, and names the package after its package.json.
+ *
+ * The directory a package lives in and the name inside its package.json have to agree - the
+ * build reads one and the dev server serves the other - so the repository's own name wins over
+ * anything typed into a modal. BARN_IMPORT_NAME is the fallback for a repository that has no
+ * package.json to ask.
+ */
+const IMPORT_SCRIPT = `
+const fs = require('fs');
+const path = require('path');
+const root = '/tmp/barn-import';
+let named = '';
+try { named = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).name || ''; } catch (e) {}
+const dir = named || process.env.BARN_IMPORT_NAME;
+const out = {};
+(function walk(d) {
+  for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+    if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+    const full = path.join(d, entry.name);
+    if (entry.isDirectory()) walk(full);
+    else out['pkg/' + dir + '/' + path.relative(root, full)] = fs.readFileSync(full, 'utf8');
+  }
+})(root);
+process.stdout.write(JSON.stringify(out));
+`;
+
+/**
+ * A pod - any pod - to run a clone in.
+ *
+ * Importing needs git, a network and a filesystem, and the extension being imported has none of
+ * them yet: it does not exist. So it borrows a pod that does. Any running extension will do,
+ * because nothing of that extension is touched: the clone lands in /tmp and is read straight
+ * back out.
+ */
+async function anyRunningPod(): Promise<string | null> {
+  for (const extension of await listExtensions().catch(() => [])) {
+    if (!extension.ready) {
+      continue;
+    }
+
+    const pod = await extensionPod(extension.name);
+
+    if (pod) {
+      return pod;
+    }
+  }
+
+  return null;
+}
+
+/**
+ * The files of a repository, cloned in a pod and read back.
+ *
+ * In a pod rather than in the browser because the alternative is the GitHub API, which hands
+ * back a tree and then one request per blob - forty-odd of them for an extension - and cannot
+ * do it at all for a repository whose files somebody has to be logged in to read. `git clone`
+ * is one command that already handles both, and there is a container here that has git in it.
+ */
+async function githubFiles(repo: string, ref: string, fallbackName: string): Promise<Record<string, string>> {
+  const pod = await anyRunningPod();
+
+  if (!pod) {
+    throw new Error('importing needs one extension already running, because the clone happens in its pod');
+  }
+
+  const token = await readToken();
+  // Public repositories need no token. A private one without a token fails in `git clone` with
+  // GitHub's own message, which says more than a check here would.
+  const auth = token ? btoa(`x-access-token:${ token }`) : '';
+  const scrub = (text: string) => (token ? text.split(token).join('***').split(auth).join('***') : text);
+  const authArg = auth ? `-c http.extraheader=${ shellQuote(`AUTHORIZATION: basic ${ auth }`) }` : '';
+  const branchArg = ref ? `--branch ${ shellQuote(ref) }` : '';
+
+  const clone = await podExecOnce(pod, asPodUser(
+    `rm -rf /tmp/barn-import && git ${ authArg } clone --depth 1 ${ branchArg } ${ shellQuote(`https://github.com/${ repo }.git`) } /tmp/barn-import 2>&1 && echo BARN-CLONE-OK`
+  ));
+
+  if (!clone.includes('BARN-CLONE-OK')) {
+    throw new Error(scrub(`could not clone ${ repo }: ${ clone.slice(0, 400) || 'no output' }`));
+  }
+
+  const encoded = btoa(IMPORT_SCRIPT);
+  const script = '/tmp/barn-import.js';
+
+  await podExecOnce(pod, asPodUser(`echo ${ encoded } | base64 -d > ${ script }`));
+
+  const out = await podExecOnce(pod, asPodUser(
+    `BARN_IMPORT_NAME=${ shellQuote(fallbackName) } node ${ script }`
+  ));
+
+  let tree: Record<string, string>;
+
+  try {
+    tree = JSON.parse(out);
+  } catch {
+    throw new Error(`could not read ${ repo }'s tree: ${ out.slice(0, 200) || 'no output' }`);
+  }
+
+  if (!Object.keys(tree).length) {
+    throw new Error(`${ repo } has no files to import`);
+  }
+
+  // Tidy up after ourselves: this pod belongs to an extension somebody is working in, and a
+  // clone left in its /tmp is the next person's confusion.
+  await podExecOnce(pod, asPodUser('rm -rf /tmp/barn-import /tmp/barn-import.js')).catch(() => null);
+
+  return withSkeleton(tree);
 }
 
 function deployment(name: string): Record<string, unknown> {
@@ -466,7 +591,19 @@ export function ensureExtension(name: string, source = DEFAULT_SEED): Promise<vo
     const cm = await extGet('configmaps', object);
     // A clone reads the source pod; a built-in seed is already here. Either way the result is
     // one ConfigMap, and from the pod's point of view there is no difference between them.
-    const files = BUILT_IN_SEEDS.includes(source) ? seedFiles(source) : await cloneFiles(source);
+    // Three kinds of source now: a built-in seed that is already in this bundle, a repository
+    // to clone, and the name of an extension running here to copy out of its pod.
+    const github = parseGithubSource(source);
+    let files: Record<string, string>;
+
+    if (BUILT_IN_SEEDS.includes(source)) {
+      files = seedFiles(source);
+    } else if (github) {
+      files = await githubFiles(github.repo, github.ref, name);
+    } else {
+      files = await cloneFiles(source);
+    }
+
     const data = seedData(files);
 
     if (cm) {
@@ -1252,6 +1389,131 @@ export interface PublishResult {
  * "building" and "copying it where the dev server can serve it" are two separate things, and a
  * bar that counted them differently from the code that runs them would be a bar that lies.
  */
+// ---------------------------------------------------------------------------
+// What the editor is configured with.
+// ---------------------------------------------------------------------------
+
+/**
+ * One Secret in the extensions' own namespace, holding what the editor needs and does not
+ * generate: today a GitHub token and the repository it belongs to.
+ *
+ * A Secret rather than localStorage, and not because a token is dramatic. It is that the
+ * thing which eventually uses it is a pod: publishing runs in the extension's own container,
+ * so a credential kept in one person's browser is a credential the build cannot reach.
+ */
+export const SETTINGS_SECRET = 'barn-settings';
+
+/** The key names are the Secret's, so `kubectl get secret barn-settings -o yaml` reads plainly. */
+export const TOKEN_KEY = 'gh_token';
+
+/**
+ * The repository is per extension; the token is not.
+ *
+ * A token is an account's, and the account is the person using this - one of them, reused by
+ * everything they publish. A repository is the extension's own: two extensions in here are two
+ * separate things that belong in two separate repositories, and a single setting would mean
+ * publishing one of them over the other. Which has to be a setting rather than a convention
+ * because the name in the pod and the name of a repository agree only by luck.
+ *
+ * A Secret key may hold `[-._a-zA-Z0-9]`, and an extension's name is normalised into that same
+ * alphabet before it ever names an object (see normalizeExtensionName), so this cannot produce
+ * a key Kubernetes will reject.
+ */
+export function repoKey(extension: string): string {
+  return `gh_repo.${ extension }`;
+}
+
+export interface EditorSettings {
+  /**
+   * Whether a token is stored - never the token itself.
+   *
+   * A credential that has been saved does not come back out to a page. What a settings form
+   * needs to know is whether the field is already filled, which this answers, and the field
+   * then says "leave blank to keep" rather than showing a value somebody could shoulder-read.
+   */
+  hasToken: boolean;
+  /** `owner/name`. Not a secret, so it comes back as typed and the field can show it. */
+  repo: string;
+}
+
+/** UTF-8 safe, because btoa alone throws on anything outside latin-1 and a repo name can be. */
+function encodeSecret(value: string): string {
+  return btoa(String.fromCharCode(...new TextEncoder().encode(value)));
+}
+
+function decodeSecret(value: string): string {
+  return new TextDecoder().decode(Uint8Array.from(atob(value), (c) => c.charCodeAt(0)));
+}
+
+/**
+ * What is configured for one extension. Absent, unreadable and empty Secret are all "nothing yet".
+ *
+ * The token half of the answer is the same whichever extension asks; the repository half is
+ * that extension's own.
+ */
+export async function readSettings(extension: string): Promise<EditorSettings> {
+  const secret = await extGet('secrets', SETTINGS_SECRET);
+  const data = secret?.data || {};
+  const repo = data[repoKey(extension)];
+
+  return {
+    hasToken: !!data[TOKEN_KEY],
+    repo:     repo ? decodeSecret(repo) : '',
+  };
+}
+
+/**
+ * Write only the keys that were touched.
+ *
+ * A field the form left `undefined` is not in `changes` and is not written, which is what stops
+ * opening settings and saving from blanking a token nobody could see. `''` is a deliberate
+ * clear, and is the only way to remove one.
+ */
+export async function saveSettings(extension: string, changes: { token?: string; repo?: string }): Promise<void> {
+  const existing = await extGet('secrets', SETTINGS_SECRET);
+  const data: Record<string, string> = { ...(existing?.data || {}) };
+  const apply = (key: string, value: string | undefined) => {
+    if (value === undefined) {
+      return;
+    }
+    if (value === '') {
+      delete data[key];
+    } else {
+      data[key] = encodeSecret(value);
+    }
+  };
+
+  apply(TOKEN_KEY, changes.token);
+  apply(repoKey(extension), changes.repo);
+
+  await ensureShared();
+
+  if (existing) {
+    await rancherFetch(`${ EXT_BASE }/v1/secrets/${ EXT_NS }/${ SETTINGS_SECRET }`, {
+      method: 'PUT',
+      body:   JSON.stringify({ ...existing, data }),
+    });
+  } else {
+    await rancherFetch(`${ EXT_BASE }/v1/secrets`, {
+      method: 'POST',
+      body:   JSON.stringify({
+        apiVersion: 'v1',
+        kind:       'Secret',
+        type:       'Opaque',
+        metadata:   { namespace: EXT_NS, name: SETTINGS_SECRET },
+        data,
+      }),
+    });
+  }
+}
+
+/** The token itself, for the one caller that has to send it somewhere. Never for a page. */
+async function readToken(): Promise<string> {
+  const secret = await extGet('secrets', SETTINGS_SECRET);
+
+  return secret?.data?.[TOKEN_KEY] ? decodeSecret(secret.data[TOKEN_KEY]) : '';
+}
+
 export const PUBLISH_STAGES = [
   'Reading the package',
   'Building the extension',
@@ -1343,6 +1605,116 @@ export async function publishExtension(name: string, onProgress?: PublishProgres
   return {
     plugin, version, url, log
   };
+}
+
+
+export const GITHUB_PUBLISH_STAGES = [
+  'Reading the settings',
+  'Reading the package',
+  'Committing the package',
+  'Pushing to GitHub',
+];
+
+/**
+ * Push the extension's own source to the repository configured in settings.
+ *
+ * The other Publish builds a bundle and points this Rancher at it, which reaches exactly the
+ * cluster you are standing in. This one is the other half: the package is already a git
+ * repository in the pod (see ensureExtensionRepo), so publishing it is adding a remote and
+ * pushing, and what comes out is a repository somebody else can build from.
+ *
+ * It pushes source rather than a built bundle deliberately. A chart repository is built by the
+ * receiving repository's own workflow from a tagged version - that is how barn itself is
+ * published - and a bundle committed by hand would be the same artifact with no provenance.
+ *
+ * The token never reaches this page and never reaches the returned log: it is read straight
+ * out of the Secret into the command, and scrubbed out of the output before it comes back. See
+ * scrub below, which is not decoration - the log is shown in the UI when a publish fails.
+ *
+ * The repository is asked for at the point of publishing rather than configured beforehand,
+ * because it is a decision about this push and not a property of the extension. It is
+ * remembered afterwards so the next one only has to be agreed with, which is the difference
+ * between a cache and a setting: the answer is kept, but the question is still asked.
+ */
+export async function publishExtensionToGithub(name: string, repo: string, onProgress?: PublishProgress): Promise<GithubPublishResult> {
+  const total = GITHUB_PUBLISH_STAGES.length;
+  const report = (stage: number) => onProgress?.(stage, GITHUB_PUBLISH_STAGES[stage - 1], total);
+
+  report(1);
+
+  const token = await readToken();
+
+  if (!repo) {
+    throw new PublishError('No repository was given.', GITHUB_PUBLISH_STAGES[0], '');
+  }
+
+  if (!token) {
+    throw new PublishError('No GitHub token is configured. Add one in the editor settings.', GITHUB_PUBLISH_STAGES[0], '');
+  }
+
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) {
+    throw new PublishError(`"${ repo }" is not owner/name`, GITHUB_PUBLISH_STAGES[0], '');
+  }
+
+  // Remembered before the push rather than after it. A push that fails is the one most likely
+  // to be tried again, and retyping the repository to do so is the annoyance this avoids.
+  await saveSettings(name, { repo }).catch(() => null);
+
+  const pod = await extensionPod(name);
+
+  if (!pod) {
+    throw new PublishError(`${ name } has no running pod to push from`, GITHUB_PUBLISH_STAGES[0], '');
+  }
+
+  report(2);
+
+  const { name: plugin, version } = await packageIdentity(name);
+
+  // The same basic auth GitHub Actions uses for a token: the header rather than the URL, so it
+  // is not written into .git/config where the next person to open a terminal would find it.
+  const auth = btoa(`x-access-token:${ token }`);
+  const remote = `https://github.com/${ repo }.git`;
+  const scrub = (text: string) => text.split(token).join('***').split(auth).join('***');
+
+  // A repository to push, which for a pod that has never had one is one `git init`.
+  await ensureExtensionRepo(name);
+
+  report(3);
+
+  const commitLog = await inPackage(name, [
+    'git add -A',
+    // Nothing to commit is not a failure: the push below is still worth making, because the
+    // last one may have been what failed.
+    `git diff --cached --quiet || git -c user.email=barn@rancher.local -c user.name=barn commit -q -m ${ shellQuote(`${ plugin } ${ version }`) }`,
+    'echo BARN-COMMIT-OK',
+  ].join(' ; '));
+
+  if (!commitLog.includes('BARN-COMMIT-OK')) {
+    throw new PublishError('the package could not be committed', GITHUB_PUBLISH_STAGES[2], scrub(commitLog));
+  }
+
+  report(4);
+
+  const pushLog = await inPackage(name, [
+    `git -c http.extraheader=${ shellQuote(`AUTHORIZATION: basic ${ auth }`) } push ${ shellQuote(remote) } HEAD:refs/heads/main 2>&1`,
+    'echo BARN-PUSH-OK',
+  ].join(' && '));
+
+  if (!pushLog.includes('BARN-PUSH-OK')) {
+    throw new PublishError(`could not push to ${ repo }`, GITHUB_PUBLISH_STAGES[3], scrub(pushLog));
+  }
+
+  return {
+    plugin, version, repo, url: `https://github.com/${ repo }`, log: scrub(pushLog),
+  };
+}
+
+export interface GithubPublishResult {
+  plugin: string;
+  version: string;
+  repo: string;
+  url: string;
+  log: string;
 }
 
 /**

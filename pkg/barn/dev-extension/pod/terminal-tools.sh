@@ -17,11 +17,48 @@ set -e
 
 LOCK=/tmp/terminal-tools.lock
 
+# A directory, because mkdir is the atomic test-and-set every shell already has. What is in it
+# is the pid of whoever took it, and that is the whole difference between a lock somebody is
+# using and a lock somebody left behind.
+#
+# One does get left behind. A tab is a Kubernetes exec, and closing the browser tab - or
+# reloading the page, or losing the network for long enough - hangs up the shell on the other
+# end. An uncaught HUP kills it without running its EXIT trap, so if that shell was the one
+# holding the lock, the lock outlives it. Every tab opened afterwards then sits printing
+# "another install is running" at an install that finished hours ago, which is not a wait that
+# ends: nothing is coming to release it short of the pod restarting.
+#
+# So: HUP is trapped below, which stops most of them being created, and a lock whose holder is
+# gone is taken over here, which recovers the ones that get created anyway.
+waited=0
+
 while ! mkdir "$LOCK" 2>/dev/null; do
+  holder=$(cat "$LOCK/pid" 2>/dev/null || true)
+
+  if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+    echo "[tools] the install holding this lock is gone; clearing it"
+    rm -rf "$LOCK"
+    continue
+  fi
+
+  # No pid in it at all is either the microsecond between mkdir and the write below, or a
+  # process that died inside that microsecond. Waiting a little distinguishes them without
+  # having to guess: the first resolves itself, the second never will.
+  if [ -z "$holder" ] && [ "$waited" -ge 10 ]; then
+    echo "[tools] this lock has no owner; clearing it"
+    rm -rf "$LOCK"
+    continue
+  fi
+
   echo "[tools] another install is running, waiting for it"
+  waited=$((waited + 1))
   sleep 3
 done
-trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT INT TERM
+
+echo $$ > "$LOCK/pid"
+
+# HUP is the one that matters here; see above. The others are for completeness.
+trap 'rm -rf "$LOCK" 2>/dev/null || true' EXIT INT TERM HUP
 
 if ! command -v tmux >/dev/null 2>&1; then
   echo "[tools] installing tmux"
