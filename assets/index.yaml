@@ -12,16 +12,38 @@ entries:
       catalog.cattle.io/ui-component: plugins
       catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
     apiVersion: v2
-    appVersion: 0.5.19
-    created: "2026-08-19T20:44:37.789293694Z"
+    appVersion: 0.5.20
+    created: "2026-08-19T20:56:37.002136791Z"
     description: Provision and manage closet dev environments from Rancher
-    digest: f21e8d370d9537bdd611d90f19d462a91471914f5fe916c29e708e888faef45d
+    digest: 67fbdacb460d8fd575ffa1db00d61d18acfce6913b984aad37a5fe13e5c97a59
     home: https://github.com/codyrancher/barn
     icon: https://rancher.github.io/ui-internal-tools/ai/magic-closet/logo.svg
     name: barn
     type: application
     urls:
-    - assets/barn/barn-0.5.19.tgz
+    - assets/barn/barn-0.5.20.tgz
+    version: 0.5.20
+  - annotations:
+      catalog.cattle.io/certified: rancher
+      catalog.cattle.io/display-name: Barn
+      catalog.cattle.io/namespace: cattle-ui-plugin-system
+      catalog.cattle.io/os: linux
+      catalog.cattle.io/permits-os: linux, windows
+      catalog.cattle.io/rancher-version: '>= 2.10.0'
+      catalog.cattle.io/scope: management
+      catalog.cattle.io/ui-component: plugins
+      catalog.cattle.io/ui-extensions-version: '>= 3.0.0 < 4.0.0'
+    apiVersion: v2
+    appVersion: 0.5.19
+    created: "2026-08-19T20:44:57.229608034Z"
+    description: Provision and manage closet dev environments from Rancher
+    digest: 668271e1c28d9e04030eb42e4cefc21999697ef9edc32192bca1b26ba3dfa549
+    home: https://github.com/codyrancher/barn
+    icon: https://rancher.github.io/ui-internal-tools/ai/magic-closet/logo.svg
+    name: barn
+    type: application
+    urls:
+    - https://github.com/codyrancher/barn/releases/download/barn-0.5.19/barn-0.5.19.tgz
     version: 0.5.19
   - annotations:
       catalog.cattle.io/certified: rancher
@@ -111,4 +133,4 @@ entries:
     urls:
     - assets/barn/barn-0.5.15.tgz
     version: 0.5.15
-generated: "2026-08-19T20:44:37.788693373Z"
+generated: "2026-08-19T20:56:37.001024161Z"
