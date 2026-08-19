@@ -179,6 +179,10 @@ export default {
     // re-connects on its own, because `extension` is a prop of it.
     extension() {
       this.rightUrl = '';
+      // The poll from the extension being left is still in its sleep. Waking it early is not
+      // the point - waitForDevServer checks whose it is - but leaving a timer behind for the
+      // page to clear later is untidy when a new one is about to replace it.
+      clearTimeout(this.devPollTimer);
       this.waitForDevServer();
     },
 
@@ -220,15 +224,30 @@ export default {
   },
 
   methods: {
-    // Frame the dev server once it answers. It's created when the extension
-    // loads, but a cold one installs and compiles for a few minutes first, and
-    // framing it before then would show the proxy's error page instead.
+    /**
+     * Frame the dev server once it answers.
+     *
+     * It is created when the extension loads, but a cold one installs and compiles for a few
+     * minutes first, and framing it before then would show the proxy's error page instead. So
+     * this is a poll, and the poll outlives the extension it was started for: a new one is
+     * created when the extension changes, while the old one is still asleep between checks.
+     *
+     * Hence `mine`. Without it the loop that was waiting on the extension you left goes on
+     * polling, and when that one finally comes up - which is exactly what happens if you start
+     * one and switch away while it builds - it frames itself over whatever you switched to.
+     * Every use of the name below is the one this loop was started for, and the last check
+     * before framing is against the current one, because minutes pass inside that await.
+     */
     async waitForDevServer() {
-      ensureExtension(this.extension);
+      const mine = this.extension;
 
-      while (!this.unmounted) {
-        if (await extensionReady(this.extension)) {
-          this.rightUrl = extensionUrl(this.extension);
+      ensureExtension(mine);
+
+      while (!this.unmounted && this.extension === mine) {
+        if (await extensionReady(mine)) {
+          if (this.extension === mine) {
+            this.rightUrl = extensionUrl(mine);
+          }
 
           return;
         }
@@ -342,24 +361,6 @@ export default {
     },
 
     /**
-     * Publish this extension, one way or the other.
-     *
-     * `local` builds it in the pod and points this Rancher at the result, which reaches exactly
-     * the cluster you are standing in. `github` pushes the package's source to the configured
-     * repository, which is the half that outlives this cluster. Both are minutes rather than
-     * seconds and both report through the same status strip, so they share this.
-     *
-     * The progress the strip counts is the running publish's own: the two have different
-     * stages, and `total` arrives with each report rather than being read from a constant, so
-     * the bar is right for whichever is running without this having to know which.
-     */
-    /**
-     * What the dropdown's lines do.
-     *
-     * Import is not a publish and does not go near publishTo: it opens a modal and the work
-     * happens afterwards, through the same onCreate every other new extension goes through.
-     */
-    /**
      * Settings, from a modal that needed a token it did not have.
      *
      * Two modals send people here and both are mid-task, so settings remembers which one and
@@ -386,6 +387,12 @@ export default {
       }
     },
 
+    /**
+     * What the dropdown's lines do.
+     *
+     * Import is not a publish and does not go near publishTo: it opens a modal and the work
+     * happens afterwards, through the same onCreate every other new extension goes through.
+     */
     onPublishSelect(id) {
       if (id === 'import') {
         this.importing = true;
@@ -409,6 +416,18 @@ export default {
       this.publishTo(id);
     },
 
+    /**
+     * Publish this extension, one way or the other.
+     *
+     * `local` builds it in the pod and points this Rancher at the result, which reaches exactly
+     * the cluster you are standing in. `github` pushes the package's source to the configured
+     * repository, which is the half that outlives this cluster. Both are minutes rather than
+     * seconds and both report through the same status strip, so they share this.
+     *
+     * The progress the strip counts is the running publish's own: the two have different
+     * stages, and `total` arrives with each report rather than being read from a constant, so
+     * the bar is right for whichever is running without this having to know which.
+     */
     async publishTo(target, repo) {
       if (this.publishing) {
         return;
