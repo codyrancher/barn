@@ -1,0 +1,2 @@
+(("undefined"!==typeof self?self:this)["webpackChunkbarn_0_5_19"]=("undefined"!==typeof self?self:this)["webpackChunkbarn_0_5_19"]||[]).push([[37],{49037:function(e){const n=[{nav:{group:{barn:"Barn"}},product:{"barn-editor":"Editor"},typeLabel:{"barn.closet":"{count, plural,\n  one { Closet }\n  other { Closets }}","barn.secret-set":"{count, plural,\n  one { Secret Set }\n  other { Secret Sets }}"}}];e.exports=n.length<=1?n[0]:n}}]);
+//# sourceMappingURL=barn-0.5.19.umd.min.37.js.map
