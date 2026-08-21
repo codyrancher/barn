@@ -27,11 +27,13 @@ import EditorSettingsModal from '../components/EditorSettingsModal.vue';
 import ImportExtensionModal from '../components/ImportExtensionModal.vue';
 import PublishGithubModal from '../components/PublishGithubModal.vue';
 import PublishSplit from '../components/PublishSplit.vue';
+import InstallProgress from '../components/InstallProgress.vue';
 import StartingExtensions from '../components/StartingExtensions.vue';
 import {
   ensureExtension, extensionReady, extensionUrl, extensionProxyPath, publishExtension,
   publishExtensionToGithub, removeLocalInstall, DEFAULT_EXTENSION
 } from '../extensions';
+import { installState } from '../install';
 
 // How close to an edge the divider can be dragged, in percent of the page.
 const MIN_SPLIT = 10;
@@ -74,7 +76,8 @@ export default {
 
   components: {
     RcIcon, RcButton, PodTerminal, ExtensionSelect, ExtensionFiles, NewExtensionModal, StartingExtensions, AsyncButton,
-    PublishStatus, EditorSettingsModal, ImportExtensionModal, PublishGithubModal, PublishSplit
+    PublishStatus, EditorSettingsModal, ImportExtensionModal, PublishGithubModal, PublishSplit,
+    InstallProgress
   },
 
   data() {
@@ -90,6 +93,10 @@ export default {
       // is (see the template): it is a live session, and unmounting it to look at a file would
       // end whatever claude was in the middle of.
       leftTab: 'cli',
+      // Whether this cluster still has objects to make before the editor is worth showing.
+      // Undefined until the first read, so the page shows neither the panes nor the checklist
+      // in the moment before it knows which is right - a flash of the wrong one reads as a bug.
+      needsInstall: undefined,
       // Whether the settings modal is open. It sits at the other end of the same bar as Files,
       // because both are about the pane under it rather than about the dashboard on the right.
       showSettings: false,
@@ -178,6 +185,8 @@ export default {
     // than keep framing the one that is no longer being edited. The terminal on the left
     // re-connects on its own, because `extension` is a prop of it.
     extension() {
+      this.needsInstall = undefined;
+      this.checkInstall();
       this.rightUrl = '';
       // The poll from the extension being left is still in its sleep. Waking it early is not
       // the point - waitForDevServer checks whose it is - but leaving a timer behind for the
@@ -202,6 +211,7 @@ export default {
   },
 
   mounted() {
+    this.checkInstall();
     // The terminal brings itself up (it waits on the pod, not on the dev
     // server), so nothing here has to wait for the left pane.
     this.waitForDevServer();
@@ -225,6 +235,28 @@ export default {
 
   methods: {
     /**
+     * Is there anything left to make before this is an editor?
+     *
+     * Read rather than assumed, and read again when the extension changes: a cluster that has
+     * been running for a week needs nothing, and a fresh one needs nine objects. Failing the
+     * read is treated as "nothing to do" - the checklist is an explanation, and a page that
+     * refuses to render because it could not decide whether to explain itself is worse than
+     * one that just opens.
+     */
+    async checkInstall() {
+      const state = await installState(this.extension).catch(() => []);
+
+      this.needsInstall = state.some((entry) => entry.state !== 'done');
+    },
+
+    onInstalled() {
+      this.needsInstall = false;
+      // The pod is new, so the poll that was waiting on the old one is waiting on nothing.
+      this.rightUrl = '';
+      this.waitForDevServer();
+    },
+
+    /**
      * Frame the dev server once it answers.
      *
      * It is created when the extension loads, but a cold one installs and compiles for a few
@@ -241,8 +273,10 @@ export default {
     async waitForDevServer() {
       const mine = this.extension;
 
-      ensureExtension(mine);
-
+      // This waits; it does not install. It used to call ensureExtension here, which quietly
+      // made the objects the checklist was about to report on - so the checklist would find
+      // nothing missing and the install nobody could see went on being invisible. Creating is
+      // InstallProgress's job now, and this starts once it says the objects are there.
       while (!this.unmounted && this.extension === mine) {
         if (await extensionReady(mine)) {
           if (this.extension === mine) {
@@ -652,7 +686,20 @@ export default {
       @dismiss="starting = starting.filter((each) => each !== $event)"
     />
 
+    <!--
+      The checklist stands in for the panes rather than sitting above them. Both panes are
+      views of a pod that does not exist yet during an install, so showing them would be
+      showing two empty boxes and a spinner beside an explanation of why.
+    -->
+    <InstallProgress
+      v-if="needsInstall === true"
+      class="mc-editor__install"
+      :extension="extension"
+      @done="onInstalled"
+    />
+
     <div
+      v-else-if="needsInstall === false"
       ref="panes"
       class="mc-editor__panes"
       :class="{ 'mc-editor__panes--dragging': dragging }"
@@ -1143,6 +1190,11 @@ $rancher-rail-width: 70px;
   &__bar-select {
     flex: 0 0 auto;
 
+  }
+
+  &__install {
+    flex:       1 1 auto;
+    min-height: 0;
   }
 
   &__panes {

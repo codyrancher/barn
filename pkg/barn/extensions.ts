@@ -73,8 +73,8 @@ const EXT_BASE = `/k8s/clusters/${ EXT_CLUSTER }`;
  * with the session of whoever is looking at it, so it widens what is reachable
  * without widening who can reach it.
  */
-const EXT_ACCOUNT = 'barn-extension';
-const EXT_ROLE_BINDING = 'barn-extension-cluster-admin';
+export const EXT_ACCOUNT = 'barn-extension';
+export const EXT_ROLE_BINDING = 'barn-extension-cluster-admin';
 
 /**
  * What an extension was seeded from, remembered on its own ConfigMap.
@@ -493,7 +493,7 @@ async function githubFiles(repo: string, ref: string, fallbackName: string): Pro
   return withSkeleton(tree);
 }
 
-function deployment(name: string): Record<string, unknown> {
+export function deploymentBody(name: string): Record<string, unknown> {
   const object = extensionObject(name);
 
   return {
@@ -573,44 +573,119 @@ function deployment(name: string): Record<string, unknown> {
  * extension, and because a second extension should not re-POST a ClusterRoleBinding
  * that is already there.
  */
+/**
+ * Create one object if it is not already there, and treat losing the race as success.
+ *
+ * Every install goes through this, and the reason it is one function is the refresh case. The
+ * state that matters lives in the cluster rather than in the page: a reload re-reads what
+ * exists and makes only what does not, so an install interrupted half way finishes rather
+ * than starting over.
+ *
+ * Which leaves the gap between the read and the write, and that is what the 409 is for. Two
+ * tabs opened at once both see nothing and both POST; one wins and the other is told the
+ * object already exists. That is the outcome both of them wanted, so it is success and not an
+ * error - without which a refresh at exactly the wrong moment is the one thing that reports a
+ * failure.
+ */
+export interface ObjectSpec {
+  type: string;
+  namespace?: string;
+  name: string;
+  body: () => Record<string, unknown>;
+}
+
+export function objectPath(spec: { type: string; namespace?: string; name: string }): string {
+  return spec.namespace
+    ? `${ EXT_BASE }/v1/${ spec.type }/${ spec.namespace }/${ spec.name }`
+    : `${ EXT_BASE }/v1/${ spec.type }/${ spec.name }`;
+}
+
+export async function objectExists(spec: { type: string; namespace?: string; name: string }): Promise<boolean> {
+  return !!await rancherFetch(objectPath(spec)).catch(() => null);
+}
+
+export async function createIfAbsent(spec: ObjectSpec): Promise<'present' | 'created'> {
+  if (await objectExists(spec)) {
+    return 'present';
+  }
+
+  try {
+    await rancherFetch(`${ EXT_BASE }/v1/${ spec.type }`, { method: 'POST', body: JSON.stringify(spec.body()) });
+
+    return 'created';
+  } catch (e: any) {
+    if (/409|already exists|alreadyexists/i.test(e?.message || '')) {
+      return 'present';
+    }
+
+    throw e;
+  }
+}
+
+/** The namespace everything here lives in. */
+export function namespaceBody(): Record<string, unknown> {
+  return { apiVersion: 'v1', kind: 'Namespace', metadata: { name: EXT_NS } };
+}
+
+/** The account the pods run as. See EXT_ACCOUNT for what it is allowed to do. */
+export function serviceAccountBody(): Record<string, unknown> {
+  return { apiVersion: 'v1', kind: 'ServiceAccount', metadata: { namespace: EXT_NS, name: EXT_ACCOUNT } };
+}
+
+/** The grant. See EXT_ACCOUNT above for why this is cluster-admin. */
+export function clusterRoleBindingBody(): Record<string, unknown> {
+  return {
+    apiVersion: 'rbac.authorization.k8s.io/v1',
+    kind:       'ClusterRoleBinding',
+    metadata:   { name: EXT_ROLE_BINDING },
+    roleRef:    { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'cluster-admin' },
+    subjects:   [{ kind: 'ServiceAccount', name: EXT_ACCOUNT, namespace: EXT_NS }],
+  };
+}
+
+/** The ClusterIP the service proxy resolves to, for an extension or for the browser. */
+export function serviceBody(object: string, ports: Record<string, unknown>[]): Record<string, unknown> {
+  return {
+    apiVersion: 'v1',
+    kind:       'Service',
+    metadata:   { namespace: EXT_NS, name: object, labels: { app: object } },
+    spec:       { selector: { app: object }, ports },
+  };
+}
+
+export const EXT_PORTS = [{ name: 'http', port: EXT_PORT, targetPort: 'http' }];
+
+/**
+ * The seed ConfigMap for an extension made from a built-in seed.
+ *
+ * Only the built-in ones, and that is not a limitation so much as a division: a clone reads
+ * another pod and an import clones a repository, both of which are work rather than a value,
+ * and both are asked for on demand rather than during the install a fresh cluster runs by
+ * itself. Those go through ensureExtension, which can wait for them.
+ */
+export function seedConfigMapBody(name: string, source: string = DEFAULT_SEED): Record<string, unknown> {
+  const object = extensionObject(name);
+  const from = BUILT_IN_SEEDS.includes(source) ? source : DEFAULT_SEED;
+
+  return {
+    apiVersion: 'v1',
+    kind:       'ConfigMap',
+    metadata:   {
+      namespace:   EXT_NS,
+      name:        object,
+      labels:      { app: object },
+      annotations: { [SOURCE_ANNOTATION]: from },
+    },
+    data: seedData(seedFiles(from)),
+  };
+}
+
 async function ensureShared(): Promise<void> {
-  const ns = await rancherFetch(`${ EXT_BASE }/v1/namespaces/${ EXT_NS }`).catch(() => null);
-
-  if (!ns) {
-    await rancherFetch(`${ EXT_BASE }/v1/namespaces`, {
-      method: 'POST',
-      body:   JSON.stringify({ apiVersion: 'v1', kind: 'Namespace', metadata: { name: EXT_NS } }),
-    }).catch(() => null);
-  }
-
-  if (!await extGet('serviceaccounts', EXT_ACCOUNT)) {
-    await rancherFetch(`${ EXT_BASE }/v1/serviceaccounts`, {
-      method: 'POST',
-      body:   JSON.stringify({
-        apiVersion: 'v1',
-        kind:       'ServiceAccount',
-        metadata:   { namespace: EXT_NS, name: EXT_ACCOUNT },
-      }),
-    }).catch(() => null);
-  }
-
-  // See EXT_ACCOUNT above for why this is cluster-admin.
-  const binding = await rancherFetch(
-    `${ EXT_BASE }/v1/rbac.authorization.k8s.io.clusterrolebindings/${ EXT_ROLE_BINDING }`
-  ).catch(() => null);
-
-  if (!binding) {
-    await rancherFetch(`${ EXT_BASE }/v1/rbac.authorization.k8s.io.clusterrolebindings`, {
-      method: 'POST',
-      body:   JSON.stringify({
-        apiVersion: 'rbac.authorization.k8s.io/v1',
-        kind:       'ClusterRoleBinding',
-        metadata:   { name: EXT_ROLE_BINDING },
-        roleRef:    { apiGroup: 'rbac.authorization.k8s.io', kind: 'ClusterRole', name: 'cluster-admin' },
-        subjects:   [{ kind: 'ServiceAccount', name: EXT_ACCOUNT, namespace: EXT_NS }],
-      }),
-    }).catch(() => null);
-  }
+  await createIfAbsent({ type: 'namespaces', name: EXT_NS, body: namespaceBody });
+  await createIfAbsent({ type: 'serviceaccounts', namespace: EXT_NS, name: EXT_ACCOUNT, body: serviceAccountBody });
+  await createIfAbsent({
+    type: 'rbac.authorization.k8s.io.clusterrolebindings', name: EXT_ROLE_BINDING, body: clusterRoleBindingBody,
+  });
 }
 
 /**
@@ -626,7 +701,7 @@ async function ensureRunning(name: string, object: string): Promise<void> {
   if (!existing) {
     await rancherFetch(`${ EXT_BASE }/v1/apps.deployments`, {
       method: 'POST',
-      body:   JSON.stringify(deployment(name)),
+      body:   JSON.stringify(deploymentBody(name)),
     }).catch(() => null);
   } else if (existing.spec?.template?.spec?.serviceAccountName !== EXT_ACCOUNT) {
     // The one thing an existing Deployment is brought up to date on.
@@ -648,17 +723,7 @@ async function ensureRunning(name: string, object: string): Promise<void> {
   }
 
   // Service (ClusterIP :8005, what the service proxy above resolves to)
-  if (!await extGet('services', object)) {
-    await rancherFetch(`${ EXT_BASE }/v1/services`, {
-      method: 'POST',
-      body:   JSON.stringify({
-        apiVersion: 'v1',
-        kind:       'Service',
-        metadata:   { namespace: EXT_NS, name: object, labels: { app: object } },
-        spec:       { selector: { app: object }, ports: [{ name: 'http', port: EXT_PORT, targetPort: 'http' }] },
-      }),
-    }).catch(() => null);
-  }
+  await createIfAbsent({ type: 'services', namespace: EXT_NS, name: object, body: () => serviceBody(object, EXT_PORTS) });
 }
 
 // `| undefined` on purpose: an index signature without it types every lookup as a live promise,
@@ -818,7 +883,7 @@ const BROWSER_CDP_PORT = 9222;
  * bundle cannot read the repo it was built from, and kept as whole files rather
  * than command lines because each has an ordering in it.
  */
-const BROWSER_SERVICES = 'barn-browser-services';
+export const BROWSER_SERVICES = 'barn-browser-services';
 
 /**
  * Republishes CDP on the pod's own address.
@@ -943,7 +1008,7 @@ export function browserUrl(): string {
   return `${ EXT_BASE }/api/v1/namespaces/${ EXT_NS }/services/http:${ BROWSER_OBJECT }:${ BROWSER_UI_PORT }/proxy/`;
 }
 
-function browserDeployment(): Record<string, unknown> {
+export function browserDeployment(): Record<string, unknown> {
   return {
     apiVersion: 'apps/v1',
     kind:       'Deployment',
@@ -1051,6 +1116,41 @@ let ensureBrowserInFlight: Promise<void> | null = null;
  * restarts the browser - which throws away the Rancher session in its profile
  * and whatever page somebody was looking at.
  */
+/** The two s6 services the browser image runs beside Chromium. */
+export function browserServicesBody(): Record<string, unknown> {
+  return {
+    apiVersion: 'v1',
+    kind:       'ConfigMap',
+    metadata:   { namespace: EXT_NS, name: BROWSER_SERVICES, labels: { app: BROWSER_OBJECT } },
+    data:       { 'cdp-proxy': CDP_PROXY, 'stream-keepalive': STREAM_KEEPALIVE },
+  };
+}
+
+export const BROWSER_PORTS = [
+  { name: 'http', port: BROWSER_UI_PORT, targetPort: 'http' },
+  { name: 'cdp', port: BROWSER_CDP_PORT, targetPort: 'cdp' },
+];
+
+/**
+ * Bring the s6 services up to date on a browser that already exists.
+ *
+ * The one upsert in the install, and it is deliberate: these are read off the mount at boot, so
+ * a corrected script reaches a running pod on its next restart rather than needing a new one.
+ * Everything else is create-if-absent, because replacing it restarts something in use.
+ */
+export async function refreshBrowserServices(): Promise<void> {
+  const cm = await extGet('configmaps', BROWSER_SERVICES);
+
+  if (!cm) {
+    return;
+  }
+
+  await rancherFetch(`${ EXT_BASE }/v1/configmaps/${ EXT_NS }/${ BROWSER_SERVICES }`, {
+    method: 'PUT',
+    body:   JSON.stringify({ ...cm, data: (browserServicesBody() as any).data }),
+  }).catch(() => null);
+}
+
 export function ensureBrowser(): Promise<void> {
   if (ensureBrowserInFlight) {
     return ensureBrowserInFlight;
@@ -1058,54 +1158,12 @@ export function ensureBrowser(): Promise<void> {
 
   ensureBrowserInFlight = (async() => {
     await ensureShared();
-
-    // The s6 services (upsert, unlike the Deployment below): a fixed script that has been
-    // corrected reaches an existing cluster on the next load, and the pod reads them at
-    // boot, so the correction lands the next time it restarts rather than needing one.
-    const services = { 'cdp-proxy': CDP_PROXY, 'stream-keepalive': STREAM_KEEPALIVE };
-    const cm = await extGet('configmaps', BROWSER_SERVICES);
-
-    if (cm) {
-      await rancherFetch(`${ EXT_BASE }/v1/configmaps/${ EXT_NS }/${ BROWSER_SERVICES }`, {
-        method: 'PUT',
-        body:   JSON.stringify({ ...cm, data: services }),
-      }).catch(() => null);
-    } else {
-      await rancherFetch(`${ EXT_BASE }/v1/configmaps`, {
-        method: 'POST',
-        body:   JSON.stringify({
-          apiVersion: 'v1',
-          kind:       'ConfigMap',
-          metadata:   { namespace: EXT_NS, name: BROWSER_SERVICES, labels: { app: BROWSER_OBJECT } },
-          data:       services,
-        }),
-      }).catch(() => null);
-    }
-
-    if (!await extGet('apps.deployments', BROWSER_OBJECT)) {
-      await rancherFetch(`${ EXT_BASE }/v1/apps.deployments`, {
-        method: 'POST',
-        body:   JSON.stringify(browserDeployment()),
-      }).catch(() => null);
-    }
-
-    if (!await extGet('services', BROWSER_OBJECT)) {
-      await rancherFetch(`${ EXT_BASE }/v1/services`, {
-        method: 'POST',
-        body:   JSON.stringify({
-          apiVersion: 'v1',
-          kind:       'Service',
-          metadata:   { namespace: EXT_NS, name: BROWSER_OBJECT, labels: { app: BROWSER_OBJECT } },
-          spec:       {
-            selector: { app: BROWSER_OBJECT },
-            ports:    [
-              { name: 'http', port: BROWSER_UI_PORT, targetPort: 'http' },
-              { name: 'cdp', port: BROWSER_CDP_PORT, targetPort: 'cdp' },
-            ],
-          },
-        }),
-      }).catch(() => null);
-    }
+    await createIfAbsent({ type: 'configmaps', namespace: EXT_NS, name: BROWSER_SERVICES, body: browserServicesBody });
+    await refreshBrowserServices();
+    await createIfAbsent({ type: 'apps.deployments', namespace: EXT_NS, name: BROWSER_OBJECT, body: browserDeployment });
+    await createIfAbsent({
+      type: 'services', namespace: EXT_NS, name: BROWSER_OBJECT, body: () => serviceBody(BROWSER_OBJECT, BROWSER_PORTS),
+    });
   })().finally(() => {
     ensureBrowserInFlight = null;
   });

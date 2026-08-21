@@ -1,6 +1,5 @@
 import { importTypes } from '@rancher/auto-import';
 import { IPlugin } from '@shell/core/types';
-import { ensureEditorContent } from './api';
 import { ensureBrowser, ensureDefaultExtension } from './extensions';
 import { EDITOR_ROUTE, EXTENSION_STARTING_ROUTE } from './editor-product';
 
@@ -12,16 +11,8 @@ export default function(plugin: IPlugin): void {
   // Provide plugin metadata from package.json
   plugin.metadata = require('./package.json');
 
-  // Closets live on the cluster explorer product (flat nav entry + generic
-  // explorer routes)
-  plugin.addProduct(require('./product'));
-
   // Side-menu button (flask icon) -> the chrome-less editor page below.
   plugin.addProduct(require('./editor-product'));
-
-  // The editor's content pod is created when the extension loads (idempotent,
-  // create-if-missing; errors swallowed so it never blocks the UI).
-  ensureEditorContent();
 
   // So is the default extension's dev server (see extensions.ts): the seed
   // ConfigMap, the pod and its Service, created here so there is somewhere to
@@ -71,15 +62,4 @@ export default function(plugin: IPlugin): void {
   //
   // The flask in the side rail is the way in (see editor-product.ts), and the extension box
   // lives on the editor's own toolbar, where it is next to the thing it changes.
-
-  // Override the core /prefs route with a wrapper that renders the original
-  // page plus an "Enable Barn" checkbox (see pages/prefs.vue). The core
-  // route is a child of the 'plain' parent route, so we must override it under
-  // that same parent (a parent-less addRoute is forced under 'default' and would
-  // just conflict, not replace).
-  plugin.addRoute('plain', {
-    name:      'prefs',
-    path:      '/prefs',
-    component: () => import('./pages/prefs.vue'),
-  });
 }

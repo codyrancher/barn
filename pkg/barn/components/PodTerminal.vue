@@ -23,7 +23,7 @@ import Socket, {
   EVENT_CONNECT_ERROR,
 } from '@shell/utils/socket';
 import {
-  ensureExtension, extensionPod, extensionShellUrl, writePodImage, DEFAULT_EXTENSION
+  extensionPod, extensionShellUrl, writePodImage, DEFAULT_EXTENSION
 } from '../extensions';
 
 // The dashboard's own build pulls this in globally; an extension's does not, so
@@ -180,10 +180,11 @@ export default {
       this.fit();
     },
 
-    // Wait for a pod, then connect. A cold pod is created by the extension
-    // itself when it loads, so this is a wait rather than an error.
+    // Wait for a pod, then connect. It is a wait rather than an error because the pod is made
+    // for us: the editor will not mount this pane until the install has reported the Deployment
+    // exists. This used to call ensureExtension itself, which made the object the checklist was
+    // about to report on and so kept the install invisible - the same mistake in three places.
     async connectWhenPodIsUp() {
-      ensureExtension(this.extension);
 
       // Whatever went wrong last time is over: this is a fresh wait, and the
       // error belongs to the connection that ended. Left in place, the exec
