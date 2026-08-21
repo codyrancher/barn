@@ -1,0 +1,53 @@
+/*
+ * The Extension Studio design, as tokens.
+ *
+ * Taken from the Figma concept ("Rancher Extension Studio - AI Authoring", frame 03 · Workspace)
+ * rather than eyeballed, so a value here can be checked against the file. Plain CSS imported
+ * from a .ts, for the reason the Dev extension's tokens file gives: the shell prepends its own
+ * SCSS to every component stylesheet, so a `@use` written in one is never the first rule in the
+ * sheet and sass refuses it.
+ *
+ * Where the design and Rancher disagree, Rancher wins on anything themed. These are literal
+ * light-mode values from a concept file, and the dashboard has a dark mode the concept does not
+ * consider - so each one falls back to the shell's own variable where there is a sensible one,
+ * and the literal is the default rather than the rule.
+ */
+:root {
+  /* Surfaces */
+  --studio-surface:        var(--body-bg, #FFFFFF);
+  --studio-surface-sunken: var(--nav-bg, #F7F8FA);
+  --studio-line:           var(--border, #DCDDE3);
+  --studio-line-soft:      var(--border, #E5E6EB);
+
+  /* Text */
+  --studio-text:           var(--body-text, #141419);
+  --studio-text-muted:     var(--muted, #8B8B96);
+  --studio-text-strong:    var(--body-text, #61616B);
+
+  /* Rancher green, which the design uses for the primary action and the selected rail item */
+  --studio-accent:         var(--primary, #3E8C4F);
+  --studio-accent-text:    var(--primary, #337041);
+
+  /* The amber "unsaved" state, mirroring Rancher's own state pill */
+  --studio-warn-bg:        #FDF6E3;
+  --studio-warn-line:      #C9A227;
+  --studio-warn-text:      #C9A227;
+
+  /* The blue "phase" chip */
+  --studio-info-bg:        #EAF4FB;
+  --studio-info-text:      #2C7BB0;
+
+  /* Type. Lato is Rancher's own face, so this is the shell's stack rather than a webfont. */
+  --studio-heading-16: 600 16px/1.5 var(--body-font, 'Lato', sans-serif);
+  --studio-heading-14: 600 14px/1.43 var(--body-font, 'Lato', sans-serif);
+  --studio-caption-12: 400 12px/1.33 var(--body-font, 'Lato', sans-serif);
+  --studio-caption-12-semi: 600 12px/1.33 var(--body-font, 'Lato', sans-serif);
+
+  /* Spacing the frame actually uses, so a gap here is the gap in the file */
+  --studio-gap:      10px;
+  --studio-gap-tight: 6px;
+  --studio-pad-x:    16px;
+  --studio-pad-y:    10px;
+  --studio-radius:   4px;
+  --studio-radius-chip: 3px;
+}

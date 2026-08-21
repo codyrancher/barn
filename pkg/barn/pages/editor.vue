@@ -28,6 +28,7 @@ import ImportExtensionModal from '../components/ImportExtensionModal.vue';
 import PublishGithubModal from '../components/PublishGithubModal.vue';
 import PublishSplit from '../components/PublishSplit.vue';
 import InstallProgress from '../components/InstallProgress.vue';
+import EditorMasthead from '../components/EditorMasthead.vue';
 import StartingExtensions from '../components/StartingExtensions.vue';
 import {
   ensureExtension, extensionReady, extensionUrl, extensionProxyPath, publishExtension,
@@ -77,7 +78,7 @@ export default {
   components: {
     RcIcon, RcButton, PodTerminal, ExtensionSelect, ExtensionFiles, NewExtensionModal, StartingExtensions, AsyncButton,
     PublishStatus, EditorSettingsModal, ImportExtensionModal, PublishGithubModal, PublishSplit,
-    InstallProgress
+    InstallProgress, EditorMasthead
   },
 
   data() {
@@ -594,6 +595,21 @@ export default {
       which half each of its words was about. Each bar is the width of the pane under it and
       moves with the divider, so the answer is where it is rather than what it says.
     -->
+    <!--
+      The masthead from the Extension Studio design: one bar across the top rather than one
+      per pane. What was on the right bar - the extension picker, publish - moves here or
+      stays beside the pane it is about; the tabs stay in the pane they switch.
+    -->
+    <EditorMasthead
+      :extension="extension"
+      :publish-options="publishOptions"
+      :publishing="publishing"
+      @back="$router.push({ name: 'home' })"
+      @files="leftTab = 'files'"
+      @publish="publishTo('local')"
+      @publish-select="onPublishSelect"
+    />
+
     <div class="mc-editor__bars">
       <div
         class="mc-editor__bar"
